@@ -12,7 +12,7 @@ encryption_key = ""  # AES-256 key for encrypting secrets at rest (32+ chars, re
 
 [server]
 host = "0.0.0.0"
-port = 8080
+port = 3000
 read_timeout = 30
 write_timeout = 30
 base_path = ""  # Set to "/subpath" if behind nginx proxy pass
@@ -81,11 +81,11 @@ audio_dir = "./audio"         # Directory for IVR audio files
 # hold_music_file = "hold_music.opus"
 # ringback_file = "ringback.opus"
 transfer_timeout_secs = 120   # How long to wait for agent to accept transfer
-recording_enabled = true      # Record calls to S3 (requires [storage] s3 config)
+recording_enabled = false      # Record calls to S3 (requires [storage] s3 config)
 udp_port_min = 10000          # WebRTC UDP port range start
 udp_port_max = 10100          # WebRTC UDP port range end
-# public_ip = "1.2.3.4"      # Public IP for NAT mapping (required on AWS/cloud)
-# relay_only = true           # Force all media through TURN relay (no direct UDP needed)
+public_ip = "14.195.30.186"      # Public IP for NAT mapping (required on AWS/cloud)
+relay_only = false           # Force all media through TURN relay (no direct UDP needed)
 
 # ICE servers for WebRTC NAT traversal
 # Configure STUN, TURN, or both. Only what you configure is used.
@@ -94,8 +94,8 @@ udp_port_max = 10100          # WebRTC UDP port range end
 # - Both: tries direct (STUN) first, falls back to TURN
 
 # Option A: STUN only (simple, no relay server needed)
-# [[calling.ice_servers]]
-# urls = ["stun:stun.l.google.com:19302"]
+[[calling.ice_servers]]
+urls = ["stun:stun.l.google.com:19302"]
 
 # Option B: TURN only (use when firewall blocks direct UDP)
 # [[calling.ice_servers]]
@@ -116,3 +116,9 @@ udp_port_max = 10100          # WebRTC UDP port range end
 email = "admin@admin.com"
 password = "admin"
 full_name = "Admin"
+
+[ai]
+provider = "google"
+api_key = "AIzaSyA6vaULHtiKwqFjGTznCLCJdnYqhFcFwxk"
+model = "gemini-1.5-flash"
+max_tokens = 500

@@ -14,7 +14,8 @@ const app = express();
 app.use(express.json());
 
 // ── Routes ────────────────────────────────────────────────────────────────────
-app.use('/webhook', require('./routes/webhook'));
+app.use('/api/webhook', require('./routes/webhook'));
+app.use('/webhook', require('./routes/webhook')); // keep original just in case
 
 // Health check
 app.get('/', (_req, res) => res.send('WhatoMate Bot is running! 🚀'));
