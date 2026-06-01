@@ -16,7 +16,9 @@ class FlowService {
             if (messageObj.type === 'text') {
                 text = messageObj.text.body;
             } else if (messageObj.type === 'interactive') {
-                text = messageObj.interactive.button_reply.title;
+                text = messageObj.interactive?.button_reply?.title
+                    || messageObj.interactive?.list_reply?.title
+                    || '';
             }
 
             const lowerText = text.toLowerCase().trim();
@@ -33,22 +35,19 @@ class FlowService {
 
             if (lowerText === 'pricing' || lowerText === 'price' || lowerText === 'prices') {
                 const reply = "💰 *Our Pricing*\n\nWe offer competitive prices! Here are some highlights:\n\n• Basic items start from ₹299\n• Premium collection from ₹999\n• Custom orders available on request\n\nReply *Menu* to see other options or just ask me about any specific product! 🛍️";
-                await crmService.saveMessage(fromPhone, 'bot', reply);
-                await whatomateService.sendOutgoingMessage(whatomateContactId, reply);
+                await this._sendAndSync(fromPhone, reply, whatomateContactId);
                 return;
             }
 
             if (lowerText === 'contact' || lowerText === 'support') {
                 const reply = "📞 *Contact Us*\n\nYou can reach us at:\n📧 prasana@tech4goodcommunity.com\n\nWe're happy to help! 😊";
-                await crmService.saveMessage(fromPhone, 'bot', reply);
-                await whatomateService.sendOutgoingMessage(whatomateContactId, reply);
+                await this._sendAndSync(fromPhone, reply, whatomateContactId);
                 return;
             }
 
             if (lowerText === 'products' || lowerText === 'product' || lowerText === 'shop' || lowerText === 'catalog' || lowerText === 'catalogue') {
                 const reply = "🛍️ *Our Products*\n\nWe have a wide range of products available! Here are our popular categories:\n\n👗 *Dresses* — Casual, formal & party wear\n👕 *Tops & Shirts* — Trendy styles for every occasion\n👖 *Bottoms* — Jeans, trousers & skirts\n🎀 *Accessories* — Bags, jewelry & more\n\nWould you like to know more about any specific category? Just type the name! 😊\n\nReply *Pricing* for rates or *Menu* for more options.";
-                await crmService.saveMessage(fromPhone, 'bot', reply);
-                await whatomateService.sendOutgoingMessage(whatomateContactId, reply);
+                await this._sendAndSync(fromPhone, reply, whatomateContactId);
                 return;
             }
 
@@ -58,24 +57,41 @@ class FlowService {
             }
 
             // 3. Fallback to AI (Google Gemini / OpenAI)
-            // Fetch last 5 messages for context
+            // Fetch local history as a fallback; the AI service will prefer PG history
             console.log(`🤖 No keyword match for "${text}", falling back to AI...`);
             const history = await crmService.getRecentMessages(fromPhone, 5);
-            const aiReply = await openaiService.generateReply(text, history);
+            const aiReply = await openaiService.generateReply(text, history, fromPhone);
 
-            // Save to DB and let WhatoMate CRM trigger the actual dispatch 
-            await crmService.saveMessage(fromPhone, 'bot', aiReply);
-            await whatomateService.sendOutgoingMessage(whatomateContactId, aiReply);
+            // Send to user via WhatsApp + sync to CRM
+            await this._sendAndSync(fromPhone, aiReply, whatomateContactId);
 
         } catch (error) {
             console.error("❌ FlowService Error:", error);
             // Send a friendly fallback message so the user never sees silence
             try {
                 const fallback = "I'm sorry, something went wrong on my end. Please try again or type *Menu* for options! 🙏";
+                await whatsappService.sendTextMessage(fromPhone, fallback);
                 await whatomateService.sendOutgoingMessage(whatomateContactId, fallback);
             } catch (e) {
                 console.error("❌ FlowService: Even fallback failed:", e.message);
             }
+        }
+    }
+
+    /**
+     * Send a reply to the user via WhatsApp AND sync to both CRM databases.
+     * This is the single point where all outgoing messages are dispatched.
+     */
+    async _sendAndSync(toPhone, message, whatomateContactId) {
+        // 1. Send via WhatsApp Cloud API (the actual delivery to user)
+        await whatsappService.sendTextMessage(toPhone, message);
+
+        // 2. Save to local SQLite CRM for conversation context
+        await crmService.saveMessage(toPhone, 'bot', message);
+
+        // 3. Sync to WhatoMate PostgreSQL CRM (for dashboard visibility)
+        if (whatomateContactId) {
+            await whatomateService.sendOutgoingMessage(whatomateContactId, message);
         }
     }
 

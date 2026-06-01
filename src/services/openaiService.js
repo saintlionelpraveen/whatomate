@@ -11,7 +11,69 @@ const pool = new Pool({
     database: process.env.POSTGRES_DB || 'whatomate',
     max: 5,
     idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 5000,
 });
+
+// Handle pool-level errors so they don't crash the process
+pool.on('error', (err) => {
+    console.error('❌ [AI] PostgreSQL pool error (non-fatal):', err.message);
+});
+
+// Validate pool on startup
+pool.query('SELECT 1')
+    .then(() => console.log('✅ [AI] PostgreSQL pool connected'))
+    .catch((err) => console.error('⚠️ [AI] PostgreSQL pool initial check failed:', err.message));
+
+// Known-good Gemini model names (ordered by preference)
+const GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'];
+
+/**
+ * Mask an API key for safe logging: show first 8 and last 4 chars only.
+ */
+function maskKey(key) {
+    if (!key || key.length < 16) return '***';
+    return key.substring(0, 8) + '...' + key.substring(key.length - 4);
+}
+
+/**
+ * Retry a function with exponential backoff.
+ * Retries on 429 (rate limit) and 5xx errors; does NOT retry 401/403 (auth).
+ */
+async function retryWithBackoff(fn, maxRetries = 2, baseDelayMs = 1000) {
+    let lastError;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+            return await fn();
+        } catch (err) {
+            lastError = err;
+            const status = err.response?.status || err.status || 0;
+
+            // Don't retry on auth errors — they won't resolve by retrying
+            if (status === 401 || status === 403) {
+                console.error(`❌ [AI] Auth error (${status}), not retrying`);
+                throw err;
+            }
+
+            // Don't retry on billing/quota exhaustion — also won't resolve
+            if (err.code === 'insufficient_quota' || err.type === 'insufficient_quota') {
+                console.error(`❌ [AI] Quota exhausted (${err.code}), not retrying`);
+                throw err;
+            }
+
+            if (attempt < maxRetries) {
+                // Use Retry-After header if provided, otherwise exponential backoff
+                const retryAfter = err.response?.headers?.['retry-after'];
+                const delayMs = retryAfter
+                    ? parseInt(retryAfter, 10) * 1000
+                    : baseDelayMs * Math.pow(2, attempt);
+                const safeDelay = Math.min(delayMs || baseDelayMs, 10000);
+                console.warn(`⏳ [AI] Retry ${attempt + 1}/${maxRetries} in ${safeDelay}ms (status: ${status})`);
+                await new Promise(resolve => setTimeout(resolve, safeDelay));
+            }
+        }
+    }
+    throw lastError;
+}
 
 class AIService {
     constructor() {
@@ -64,19 +126,20 @@ class AIService {
             const result = {
                 provider: settings.ai_provider || 'google',
                 apiKey: settings.ai_api_key || config.GOOGLE_API_KEY,
-                model: settings.ai_model || 'gemini-1.5-flash',
+                model: settings.ai_model || 'gemini-2.0-flash',
                 maxTokens: settings.ai_max_tokens || 500,
                 temperature: parseFloat(settings.ai_temperature) || 0.7,
                 systemPrompt: settings.ai_system_prompt || '',
                 includeHistory: settings.ai_include_history !== false,
                 historyLimit: settings.ai_history_limit || 4,
+                organizationId: settings.organization_id,
                 contexts: contextsRes.rows,
             };
 
             this._cache = result;
             this._cacheTime = now;
 
-            console.log(`✅ [AI] Loaded settings from DB: provider=${result.provider}, model=${result.model}, contexts=${result.contexts.length}`);
+            console.log(`✅ [AI] Loaded settings from DB: provider=${result.provider}, model=${result.model}, contexts=${result.contexts.length}, key=${maskKey(result.apiKey)}`);
             return result;
 
         } catch (error) {
@@ -92,14 +155,46 @@ class AIService {
         return {
             provider: 'google',
             apiKey: config.GOOGLE_API_KEY,
-            model: config.AI_MODEL || 'gemini-1.5-flash',
+            model: config.AI_MODEL || 'gemini-2.0-flash',
             maxTokens: 500,
             temperature: 0.7,
             systemPrompt: '',
             includeHistory: true,
             historyLimit: 4,
+            organizationId: null,
             contexts: [],
         };
+    }
+
+    /**
+     * Fetch conversation history from WhatoMate's PostgreSQL chatbot_session_messages.
+     * Falls back to empty array if unavailable.
+     */
+    async getConversationHistory(phoneNumber, limit = 4) {
+        try {
+            const res = await pool.query(`
+                SELECT csm.direction, csm.message
+                FROM chatbot_session_messages csm
+                JOIN chatbot_sessions cs ON csm.session_id = cs.id
+                WHERE cs.phone_number = $1
+                  AND cs.deleted_at IS NULL
+                  AND csm.deleted_at IS NULL
+                  AND csm.message IS NOT NULL
+                  AND csm.message != ''
+                ORDER BY csm.created_at DESC
+                LIMIT $2
+            `, [phoneNumber, limit]);
+
+            // Convert WhatoMate's direction format to OpenAI-style roles
+            // and reverse to chronological order
+            return res.rows.reverse().map(row => ({
+                role: row.direction === 'inbound' ? 'user' : 'assistant',
+                content: row.message,
+            }));
+        } catch (error) {
+            console.warn('⚠️ [AI] Failed to fetch conversation history from PG:', error.message);
+            return [];
+        }
     }
 
     /**
@@ -151,141 +246,215 @@ class AIService {
         return combined;
     }
 
-    async generateReply(userMessage, contextMessages = []) {
+    /**
+     * Normalize a Gemini model name to a known-good version.
+     */
+    _normalizeGeminiModel(model) {
+        if (!model) return 'gemini-2.0-flash';
+        
+        // Always upgrade 1.5 models as they may not be available for new keys
+        if (model.includes('gemini-1.5')) return 'gemini-2.0-flash';
+        
+        // Upgrade 2.5 to 2.0 just to be safe, though 2.5 is available now
+        if (model.includes('gemini-2.5')) return 'gemini-2.0-flash';
+
+        return model; 
+    }
+
+    async generateReply(userMessage, contextMessages = [], phoneNumber = null) {
         const settings = await this._getSettings();
         const systemPrompt = this._buildSystemPrompt(settings, userMessage);
 
-        try {
-            // Route to the configured provider first
-            if (settings.provider === 'google' || (!settings.provider && config.GOOGLE_API_KEY)) {
-                const apiKey = settings.apiKey || config.GOOGLE_API_KEY;
-                if (apiKey) {
-                    try {
-                        return await this._generateWithGemini(userMessage, contextMessages, { ...settings, apiKey }, systemPrompt);
-                    } catch (err) {
-                        console.error('❌ [AI] Gemini failed, attempting OpenAI fallback:', err.message);
-                        if (config.OPENAI_API_KEY && config.OPENAI_API_KEY !== 'NONE') {
-                            return await this._generateWithOpenAI(userMessage, contextMessages, { ...settings, apiKey: config.OPENAI_API_KEY, model: 'gpt-4o-mini' }, systemPrompt);
-                        }
-                    }
-                }
+        // If we have a phone number and history is enabled, fetch PG history
+        let history = contextMessages;
+        if (phoneNumber && settings.includeHistory) {
+            const pgHistory = await this.getConversationHistory(phoneNumber, settings.historyLimit);
+            if (pgHistory.length > 0) {
+                history = pgHistory;
+                console.log(`📜 [AI] Using ${pgHistory.length} messages from PG history for ${phoneNumber}`);
+            } else if (contextMessages.length > 0) {
+                console.log(`📜 [AI] Using ${contextMessages.length} messages from local SQLite for ${phoneNumber}`);
             }
-
-            if (settings.provider === 'openai' || (!settings.provider && config.OPENAI_API_KEY)) {
-                const apiKey = settings.apiKey || config.OPENAI_API_KEY;
-                if (apiKey && apiKey !== 'NONE') {
-                    try {
-                        return await this._generateWithOpenAI(userMessage, contextMessages, { ...settings, apiKey }, systemPrompt);
-                    } catch (err) {
-                        console.error('❌ [AI] OpenAI failed, attempting Gemini fallback:', err.message);
-                        if (config.GOOGLE_API_KEY) {
-                            return await this._generateWithGemini(userMessage, contextMessages, { ...settings, apiKey: config.GOOGLE_API_KEY, model: 'gemini-2.5-flash' }, systemPrompt);
-                        }
-                    }
-                }
-            }
-        } catch (error) {
-            console.error('❌ [AI] Both AI providers failed:', error.message);
         }
 
-        return "I'm sorry, I'm having trouble connecting to my AI brain right now because the AI service is overloaded. Please try again in a few minutes! 🧠⚡";
+        // Log system prompt size for debugging (but not the content to avoid leaking data)
+        console.log(`📝 [AI] System prompt: ${systemPrompt.length} chars, ${settings.contexts.length} contexts loaded`);
+
+        // ── Try primary provider ────────────────────────────────────────────
+        const primaryIsGoogle = settings.provider === 'google' || (!settings.provider && config.GOOGLE_API_KEY);
+        const primaryIsOpenAI = settings.provider === 'openai' || (!settings.provider && !config.GOOGLE_API_KEY && config.OPENAI_API_KEY);
+
+        // Attempt 1: Primary provider
+        if (primaryIsGoogle) {
+            const apiKey = settings.apiKey || config.GOOGLE_API_KEY;
+            if (apiKey) {
+                try {
+                    return await retryWithBackoff(
+                        () => this._generateWithGemini(userMessage, history, { ...settings, apiKey }, systemPrompt),
+                        1
+                    );
+                } catch (err) {
+                    console.error(`❌ [AI] Gemini failed after retries: ${err.message}`);
+                }
+            }
+        }
+
+        if (primaryIsOpenAI) {
+            const apiKey = settings.apiKey || config.OPENAI_API_KEY;
+            if (apiKey && apiKey !== 'NONE') {
+                try {
+                    return await retryWithBackoff(
+                        () => this._generateWithOpenAI(userMessage, history, { ...settings, apiKey }, systemPrompt),
+                        1
+                    );
+                } catch (err) {
+                    console.error(`❌ [AI] OpenAI (primary) failed after retries: ${err.message}`);
+                }
+            }
+        }
+
+        // Attempt 2: Fallback to the other provider
+        if (primaryIsGoogle && config.OPENAI_API_KEY && config.OPENAI_API_KEY !== 'NONE') {
+            try {
+                console.log('🔄 [AI] Falling back to OpenAI...');
+                return await retryWithBackoff(
+                    () => this._generateWithOpenAI(userMessage, history, {
+                        ...settings,
+                        apiKey: config.OPENAI_API_KEY,
+                        model: 'gpt-4o-mini'
+                    }, systemPrompt),
+                    1
+                );
+            } catch (err) {
+                console.error(`❌ [AI] OpenAI fallback also failed: ${err.message}`);
+            }
+        }
+
+        if (primaryIsOpenAI && config.GOOGLE_API_KEY) {
+            try {
+                console.log('🔄 [AI] Falling back to Gemini...');
+                return await retryWithBackoff(
+                    () => this._generateWithGemini(userMessage, history, {
+                        ...settings,
+                        apiKey: config.GOOGLE_API_KEY,
+                        model: 'gemini-2.0-flash'
+                    }, systemPrompt),
+                    1
+                );
+            } catch (err) {
+                console.error(`❌ [AI] Gemini fallback also failed: ${err.message}`);
+            }
+        }
+
+        // All providers failed
+        console.error('🚨 [AI] ALL AI providers failed. Check your API keys and billing.');
+        return "I'm sorry, I'm having trouble connecting right now. Let me connect you to our team for help. Please type *menu* or try again in a moment! 🙏";
     }
 
     async _generateWithGemini(userMessage, contextMessages = [], settings, systemPrompt) {
-        try {
-            let model = settings.model || 'gemini-2.5-flash';
-            // Upgrade old 1.5 models to 2.5
-            if (model.includes('gemini-1.5')) {
-                model = 'gemini-2.5-flash';
-            }
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${settings.apiKey}`;
+        const model = this._normalizeGeminiModel(settings.model);
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${settings.apiKey}`;
 
-            // Build conversation history for Gemini
-            const contents = [];
+        // Build conversation history for Gemini
+        const contents = [];
 
-            // Add conversation history
-            for (const msg of contextMessages) {
-                contents.push({
-                    role: msg.role === 'user' ? 'user' : 'model',
-                    parts: [{ text: msg.content }]
-                });
-            }
-
-            // Add current user message
+        // Add conversation history
+        for (const msg of contextMessages) {
             contents.push({
-                role: 'user',
-                parts: [{ text: userMessage }]
+                role: msg.role === 'user' ? 'user' : 'model',
+                parts: [{ text: msg.content }]
             });
-
-            const payload = {
-                contents: contents,
-                system_instruction: {
-                    parts: [{ text: systemPrompt }]
-                },
-                generationConfig: {
-                    maxOutputTokens: settings.maxTokens || 500,
-                    temperature: settings.temperature || 0.7
-                }
-            };
-
-            console.log(`🤖 [AI] Sending to Gemini (${model}): "${userMessage}"`);
-
-            const response = await axios.post(url, payload, {
-                headers: { 'Content-Type': 'application/json' },
-                timeout: 30000
-            });
-
-            const reply = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-            if (!reply) {
-                throw new Error('Gemini returned empty response');
-            }
-
-            console.log(`✅ [AI] Gemini reply: "${reply.substring(0, 100)}..."`);
-            return reply.trim();
-
-        } catch (error) {
-            console.error('❌ [AI] Gemini Error Details:', error.response?.data || error.message);
-            throw error; // throw to trigger fallback
         }
+
+        // Add current user message
+        contents.push({
+            role: 'user',
+            parts: [{ text: userMessage }]
+        });
+
+        const payload = {
+            contents: contents,
+            system_instruction: {
+                parts: [{ text: systemPrompt }]
+            },
+            generationConfig: {
+                maxOutputTokens: settings.maxTokens || 500,
+                temperature: settings.temperature || 0.7
+            }
+        };
+
+        console.log(`🤖 [AI] Sending to Gemini (${model}): "${userMessage.substring(0, 80)}..."`);
+
+        const response = await axios.post(url, payload, {
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 30000
+        });
+
+        const reply = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+        if (!reply) {
+            // Check for blocked content
+            const finishReason = response.data?.candidates?.[0]?.finishReason;
+            if (finishReason === 'SAFETY') {
+                console.warn('⚠️ [AI] Gemini response blocked by safety filters');
+                throw new Error('Gemini response blocked by safety filters');
+            }
+            throw new Error('Gemini returned empty response');
+        }
+
+        console.log(`✅ [AI] Gemini reply (${reply.length} chars): "${reply.substring(0, 100)}..."`);
+        return reply.trim();
     }
 
     async _generateWithOpenAI(userMessage, contextMessages = [], settings, systemPrompt) {
-        try {
-            const { OpenAI } = require('openai');
-            const openai = new OpenAI({
-                apiKey: settings.apiKey,
-            });
-
-            const messages = [
-                { role: "system", content: systemPrompt },
-            ];
-
-            contextMessages.forEach(msg => {
-                messages.push({
-                    role: msg.role === 'user' ? 'user' : 'assistant',
-                    content: msg.content
-                });
-            });
-
-            messages.push({ role: "user", content: userMessage });
-
-            console.log(`🤖 [AI] Sending to OpenAI (${settings.model || "gpt-4o-mini"}): "${userMessage}"`);
-            
-            const response = await openai.chat.completions.create({
-                model: settings.model || "gpt-4o-mini",
-                messages: messages,
-                max_tokens: settings.maxTokens || 500,
-                temperature: settings.temperature || 0.7
-            });
-
-            const reply = response.choices[0].message.content.trim();
-            console.log(`✅ [AI] OpenAI reply: "${reply.substring(0, 100)}..."`);
-            return reply;
-        } catch (error) {
-            console.error("❌ [AI] OpenAI Error Details:", error.message);
-            throw error; // throw to trigger fallback
+        const { OpenAI } = require('openai');
+        
+        const openaiConfig = {
+            apiKey: settings.apiKey,
+            timeout: 30000,
+        };
+        
+        // Support for custom OpenAI-compatible providers (Nvidia, Groq, OpenRouter)
+        if (config.OPENAI_BASE_URL) {
+            openaiConfig.baseURL = config.OPENAI_BASE_URL;
         }
+
+        const openai = new OpenAI(openaiConfig);
+
+        const messages = [
+            { role: "system", content: systemPrompt },
+        ];
+
+        contextMessages.forEach(msg => {
+            messages.push({
+                role: msg.role === 'user' ? 'user' : 'assistant',
+                content: msg.content
+            });
+        });
+
+        messages.push({ role: "user", content: userMessage });
+
+        let modelName = settings.model || "gpt-4o-mini";
+        
+        // If we are using standard OpenAI, don't pass 'gemini-*' model names to it
+        // However, if we are using a custom provider (like OpenRouter), they MIGHT support 'gemini-*' names!
+        const isCustomProvider = !!config.OPENAI_BASE_URL;
+        if (!isCustomProvider && modelName.startsWith('gemini')) {
+            modelName = 'gpt-4o-mini';
+        }
+
+        console.log(`🤖 [AI] Sending to OpenAI-Compatible API (${modelName}): "${userMessage.substring(0, 80)}..."`);
+
+        const response = await openai.chat.completions.create({
+            model: modelName,
+            messages: messages,
+            max_tokens: settings.maxTokens || 500,
+            temperature: settings.temperature || 0.7
+        });
+
+        const reply = response.choices[0].message.content.trim();
+        console.log(`✅ [AI] OpenAI API reply (${reply.length} chars): "${reply.substring(0, 100)}..."`);
+        return reply;
     }
 
     /**
@@ -295,6 +464,32 @@ class AIService {
         this._cache = null;
         this._cacheTime = 0;
         console.log('🔄 [AI] Settings cache cleared');
+    }
+
+    /**
+     * Health check — verify DB and AI provider connectivity
+     */
+    async healthCheck() {
+        const checks = { db: false, provider: 'unknown', hasApiKey: false };
+
+        try {
+            await pool.query('SELECT 1');
+            checks.db = true;
+        } catch (e) {
+            checks.dbError = e.message;
+        }
+
+        try {
+            const settings = await this._getSettings();
+            checks.provider = settings.provider;
+            checks.hasApiKey = !!(settings.apiKey);
+            checks.model = settings.model;
+            checks.contextCount = settings.contexts?.length || 0;
+        } catch (e) {
+            checks.settingsError = e.message;
+        }
+
+        return checks;
     }
 }
 

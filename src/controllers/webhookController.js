@@ -1,7 +1,53 @@
+const crypto = require('crypto');
 const config = require('../config');
 const flowService = require('../services/flowService');
 const crmService = require('../services/crmService');
 const whatomateService = require('../services/whatomateService');
+
+// ── Message deduplication ────────────────────────────────────────────────────
+// Track recently processed message IDs to prevent duplicate processing
+// (Meta sometimes sends the same webhook multiple times)
+const processedMessages = new Map();
+const DEDUP_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+// Clean up old entries every 5 minutes
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, timestamp] of processedMessages) {
+        if (now - timestamp > DEDUP_TTL_MS) {
+            processedMessages.delete(key);
+        }
+    }
+}, DEDUP_TTL_MS);
+
+/**
+ * Verify webhook signature from Meta using HMAC-SHA256.
+ * If APP_SECRET is not configured, skip verification (with warning).
+ */
+function verifySignature(req) {
+    const appSecret = process.env.APP_SECRET;
+    if (!appSecret) {
+        // TODO(security): App Secret should be configured in production
+        // for webhook signature verification
+        return true;
+    }
+
+    const signature = req.headers['x-hub-signature-256'];
+    if (!signature) {
+        console.warn('⚠️ [Webhook] Missing X-Hub-Signature-256 header');
+        return false;
+    }
+
+    const expectedSignature = 'sha256=' + crypto
+        .createHmac('sha256', appSecret)
+        .update(JSON.stringify(req.body))
+        .digest('hex');
+
+    return crypto.timingSafeEqual(
+        Buffer.from(signature),
+        Buffer.from(expectedSignature)
+    );
+}
 
 exports.verifyWebhook = (req, res) => {
     const mode = req.query['hub.mode'];
@@ -24,6 +70,12 @@ exports.processMessage = async (req, res) => {
     res.status(200).send('OK');
 
     try {
+        // Verify webhook signature if APP_SECRET is configured
+        if (!verifySignature(req)) {
+            console.error('❌ [Webhook] Invalid signature — rejecting payload');
+            return;
+        }
+
         const body = req.body;
 
         if (body.object !== 'whatsapp_business_account') return;
@@ -39,6 +91,16 @@ exports.processMessage = async (req, res) => {
         const contact = value?.contacts?.[0];
 
         if (!message) return;
+
+        // ── Deduplication: skip if we've already processed this message ──────
+        const messageId = message.id;
+        if (messageId && processedMessages.has(messageId)) {
+            console.log(`⏭️ [Webhook] Duplicate message ${messageId} — skipping`);
+            return;
+        }
+        if (messageId) {
+            processedMessages.set(messageId, Date.now());
+        }
 
         const fromPhone   = message.from;
         const contactName = contact?.profile?.name || 'User';
