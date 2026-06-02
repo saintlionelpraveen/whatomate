@@ -27,38 +27,9 @@ class FlowService {
             // 1. Save user message to CRM context
             await crmService.saveMessage(fromPhone, 'user', text);
 
-            // 2. Check for Keyword Flows
-            if (lowerText === 'menu' || lowerText === 'help') {
-                await this.sendMenu(fromPhone, whatomateContactId);
-                return;
-            }
-
-            if (lowerText === 'pricing' || lowerText === 'price' || lowerText === 'prices') {
-                const reply = "💰 *Our Pricing*\n\nWe offer competitive prices! Here are some highlights:\n\n• Basic items start from ₹299\n• Premium collection from ₹999\n• Custom orders available on request\n\nReply *Menu* to see other options or just ask me about any specific product! 🛍️";
-                await this._sendAndSync(fromPhone, reply, whatomateContactId);
-                return;
-            }
-
-            if (lowerText === 'contact' || lowerText === 'support') {
-                const reply = "📞 *Contact Us*\n\nYou can reach us at:\n📧 prasana@tech4goodcommunity.com\n\nWe're happy to help! 😊";
-                await this._sendAndSync(fromPhone, reply, whatomateContactId);
-                return;
-            }
-
-            if (lowerText === 'products' || lowerText === 'product' || lowerText === 'shop' || lowerText === 'catalog' || lowerText === 'catalogue') {
-                const reply = "🛍️ *Our Products*\n\nWe have a wide range of products available! Here are our popular categories:\n\n👗 *Dresses* — Casual, formal & party wear\n👕 *Tops & Shirts* — Trendy styles for every occasion\n👖 *Bottoms* — Jeans, trousers & skirts\n🎀 *Accessories* — Bags, jewelry & more\n\nWould you like to know more about any specific category? Just type the name! 😊\n\nReply *Pricing* for rates or *Menu* for more options.";
-                await this._sendAndSync(fromPhone, reply, whatomateContactId);
-                return;
-            }
-
-            if (lowerText === 'purchase' || lowerText === 'buy' || lowerText === 'order') {
-                await this.sendPurchaseMenu(fromPhone, whatomateContactId);
-                return;
-            }
-
-            // 3. Fallback to AI (Google Gemini / OpenAI)
+            // 2. Fallback to AI (Google Gemini / OpenAI)
             // Fetch local history as a fallback; the AI service will prefer PG history
-            console.log(`🤖 No keyword match for "${text}", falling back to AI...`);
+            console.log(`🤖 Processing text "${text}" with AI...`);
             const history = await crmService.getRecentMessages(fromPhone, 5);
             const aiReply = await openaiService.generateReply(text, history, fromPhone);
 
@@ -83,15 +54,16 @@ class FlowService {
      * This is the single point where all outgoing messages are dispatched.
      */
     async _sendAndSync(toPhone, message, whatomateContactId) {
-        // 1. Send via WhatsApp Cloud API (the actual delivery to user)
-        await whatsappService.sendTextMessage(toPhone, message);
-
-        // 2. Save to local SQLite CRM for conversation context
+        // 1. Save to local SQLite CRM for conversation context
         await crmService.saveMessage(toPhone, 'bot', message);
 
-        // 3. Sync to WhatoMate PostgreSQL CRM (for dashboard visibility)
+        // 2. Send the message.
+        // If WhatoMate CRM is available, sending to the CRM automatically dispatches
+        // the message to WhatsApp via their API. Otherwise, send directly.
         if (whatomateContactId) {
             await whatomateService.sendOutgoingMessage(whatomateContactId, message);
+        } else {
+            await whatsappService.sendTextMessage(toPhone, message);
         }
     }
 

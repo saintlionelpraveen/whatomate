@@ -1,0 +1,25 @@
+const { Pool } = require('pg');
+require('dotenv').config();
+
+const pool = new Pool({
+    host: process.env.DB_HOST || '127.0.0.1',
+    port: parseInt(process.env.DB_PORT || '5433', 10),
+    user: process.env.POSTGRES_USER || 'whatomate',
+    password: process.env.POSTGRES_PASSWORD || 'whatomate',
+    database: process.env.POSTGRES_DB || 'whatomate',
+});
+
+async function run() {
+    const res = await pool.query(`
+        SELECT csm.direction, csm.message, csm.created_at
+        FROM chatbot_session_messages csm
+        JOIN chatbot_sessions cs ON csm.session_id = cs.id
+        WHERE cs.phone_number = $1
+        ORDER BY csm.created_at DESC
+        LIMIT 10
+    `, ['918825607244']);
+    console.log("Last 10 messages for 918825607244:");
+    res.rows.forEach(r => console.log(`${r.direction}: ${r.message.substring(0, 50)}`));
+}
+
+run().then(() => process.exit(0)).catch(console.error);

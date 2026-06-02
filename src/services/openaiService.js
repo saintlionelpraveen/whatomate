@@ -188,7 +188,7 @@ class AIService {
             // Convert WhatoMate's direction format to OpenAI-style roles
             // and reverse to chronological order
             return res.rows.reverse().map(row => ({
-                role: row.direction === 'inbound' ? 'user' : 'assistant',
+                role: row.direction === 'incoming' ? 'user' : 'assistant',
                 content: row.message,
             }));
         } catch (error) {
@@ -265,17 +265,7 @@ class AIService {
         const settings = await this._getSettings();
         const systemPrompt = this._buildSystemPrompt(settings, userMessage);
 
-        // If we have a phone number and history is enabled, fetch PG history
-        let history = contextMessages;
-        if (phoneNumber && settings.includeHistory) {
-            const pgHistory = await this.getConversationHistory(phoneNumber, settings.historyLimit);
-            if (pgHistory.length > 0) {
-                history = pgHistory;
-                console.log(`📜 [AI] Using ${pgHistory.length} messages from PG history for ${phoneNumber}`);
-            } else if (contextMessages.length > 0) {
-                console.log(`📜 [AI] Using ${contextMessages.length} messages from local SQLite for ${phoneNumber}`);
-            }
-        }
+        const history = contextMessages;
 
         // Log system prompt size for debugging (but not the content to avoid leaking data)
         console.log(`📝 [AI] System prompt: ${systemPrompt.length} chars, ${settings.contexts.length} contexts loaded`);
