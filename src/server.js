@@ -78,6 +78,25 @@ app.post('/api/ai/clear-cache', (_req, res) => {
     res.json({ status: 'ok', message: 'AI settings cache cleared' });
 });
 
+// ── Mock API for Gold Rates (For API Fetch Testing) ──────────────────────────
+app.get('/api/gold-rate', (_req, res) => {
+    // Generate a slightly fluctuating mock price
+    const baseUsd = 2345.50; // $ per oz
+    const baseInr = 72150.00; // ₹ per 10g
+    
+    // +/- 0.5% random fluctuation
+    const fluctuate = (base) => (base * (1 + (Math.random() * 0.01 - 0.005))).toFixed(2);
+    
+    res.json({
+        success: true,
+        timestamp: new Date().toISOString(),
+        rates: {
+            USD_PER_OUNCE: fluctuate(baseUsd),
+            INR_PER_10G: fluctuate(baseInr)
+        }
+    });
+});
+
 // ── Global 404 handler ────────────────────────────────────────────────────────
 app.use((_req, res) => {
     res.status(404).json({ status: 'error', message: 'Not found' });

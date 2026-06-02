@@ -115,7 +115,7 @@ class AIService {
 
             // 2. Fetch all active AI contexts for this organization, ordered by priority
             const contextsRes = await pool.query(`
-                SELECT name, context_type, static_content, trigger_keywords, priority
+                SELECT name, context_type, static_content, trigger_keywords, priority, api_config
                 FROM ai_contexts
                 WHERE deleted_at IS NULL
                   AND is_enabled = true
@@ -200,10 +200,10 @@ class AIService {
     /**
      * Build the full system prompt by combining:
      *  1. The system prompt from chatbot_settings
-     *  2. All active AI contexts (static content)
+     *  2. All active AI contexts (static content and dynamic API fetches)
      *  3. Keyword-matched contexts get priority labeling
      */
-    _buildSystemPrompt(settings, userMessage = '') {
+    async _buildSystemPrompt(settings, userMessage = '') {
         const parts = [];
 
         // Add the base system prompt from chatbot settings
@@ -216,7 +216,7 @@ class AIService {
             const lowerMsg = (userMessage || '').toLowerCase();
 
             for (const ctx of settings.contexts) {
-                if (!ctx.static_content) continue;
+                if (!ctx.static_content && ctx.context_type !== 'api') continue;
 
                 // Check if this context is keyword-triggered
                 let isTriggered = false;
@@ -226,13 +226,59 @@ class AIService {
                     );
                 }
 
-                // Always include context (it's static knowledge), but mark triggered ones
+                // Only perform API Fetch if the context is keyword-triggered, to save bandwidth
+                // or if there are no trigger keywords (always triggered)
+                const shouldFetch = isTriggered || !ctx.trigger_keywords || ctx.trigger_keywords.length === 0;
+
+                // Always include context, but mark triggered ones
                 if (isTriggered) {
                     parts.push(`\n--- RELEVANT CONTEXT: ${ctx.name} (Priority: ${ctx.priority}) ---`);
                 } else {
                     parts.push(`\n--- CONTEXT: ${ctx.name} ---`);
                 }
-                parts.push(ctx.static_content.trim());
+                
+                if (ctx.static_content) {
+                    parts.push(ctx.static_content.trim());
+                }
+
+                // If this is an API Fetch context, fetch live data
+                if (ctx.context_type === 'api' && ctx.api_config && shouldFetch) {
+                    try {
+                        console.log(`📡 [AI] Triggering API Fetch for context: ${ctx.name}`);
+                        const apiConfig = typeof ctx.api_config === 'string' ? JSON.parse(ctx.api_config) : ctx.api_config;
+                        
+                        if (apiConfig.url) {
+                            // Replace UI variables like {{phone_number}} and {{user_message}}
+                            let finalUrl = apiConfig.url;
+                            if (finalUrl.includes('{{phone_number}}')) {
+                                finalUrl = finalUrl.replace(/\{\{phone_number\}\}/g, encodeURIComponent(phoneNumber || ''));
+                            }
+                            if (finalUrl.includes('{{user_message}}')) {
+                                finalUrl = finalUrl.replace(/\{\{user_message\}\}/g, encodeURIComponent(userMessage || ''));
+                            }
+
+                            const apiRes = await axios({
+                                method: apiConfig.method || 'GET',
+                                url: finalUrl,
+                                headers: apiConfig.headers || {},
+                                timeout: 5000 // 5 second strict timeout so it doesn't hang
+                            });
+                            
+                            parts.push(`\n[LIVE API DATA FETCHED SUCCESSFULLY — THE FOLLOWING JSON IS THE ONLY SOURCE OF TRUTH. YOU MUST ANSWER QUESTIONS USING ONLY THIS DATA. DO NOT INVENT OR GUESS ANY VALUES.]`);
+                            
+                            let dataStr = JSON.stringify(apiRes.data, null, 2);
+                            if (dataStr.length > 4000) {
+                                console.warn(`⚠️ [AI] API response is huge (${dataStr.length} chars). Truncating to 4000 chars.`);
+                                dataStr = dataStr.substring(0, 4000) + '\n\n... [SYSTEM WARNING: DATA TRUNCATED BECAUSE IT IS TOO LARGE. SUMMARIZE ONLY THE CORE ITEMS SEEN ABOVE. DO NOT LIST EVERYTHING.]';
+                            }
+                            
+                            parts.push(dataStr);
+                        }
+                    } catch (err) {
+                        console.error(`❌ [AI] API Fetch failed for ${ctx.name}:`, err.message);
+                        parts.push(`\n[LIVE API DATA UNAVAILABLE AT THIS TIME]`);
+                    }
+                }
             }
         }
 
@@ -263,12 +309,15 @@ class AIService {
 
     async generateReply(userMessage, contextMessages = [], phoneNumber = null) {
         const settings = await this._getSettings();
-        const systemPrompt = this._buildSystemPrompt(settings, userMessage);
+        const systemPrompt = await this._buildSystemPrompt(settings, userMessage);
 
         const history = contextMessages;
 
-        // Log system prompt size for debugging (but not the content to avoid leaking data)
+        // Log system prompt for debugging
         console.log(`📝 [AI] System prompt: ${systemPrompt.length} chars, ${settings.contexts.length} contexts loaded`);
+        console.log(`📝 [AI] FULL SYSTEM PROMPT START >>>`);
+        console.log(systemPrompt);
+        console.log(`<<< FULL SYSTEM PROMPT END`);
 
         // ── Try primary provider ────────────────────────────────────────────
         const primaryIsGoogle = settings.provider === 'google' || (!settings.provider && config.GOOGLE_API_KEY);
@@ -368,8 +417,8 @@ class AIService {
                 parts: [{ text: systemPrompt }]
             },
             generationConfig: {
-                maxOutputTokens: settings.maxTokens || 500,
-                temperature: settings.temperature || 0.7
+                maxOutputTokens: settings.maxTokens || 1000,
+                temperature: 0.1
             }
         };
 
@@ -438,8 +487,8 @@ class AIService {
         const response = await openai.chat.completions.create({
             model: modelName,
             messages: messages,
-            max_tokens: settings.maxTokens || 500,
-            temperature: settings.temperature || 0.7
+            max_tokens: settings.maxTokens || 1000,
+            temperature: 0.1
         });
 
         const reply = response.choices[0].message.content.trim();
