@@ -77,10 +77,10 @@ async function retryWithBackoff(fn, maxRetries = 2, baseDelayMs = 1000) {
 
 class AIService {
     constructor() {
-        // Cache for settings + contexts (refreshed every 5 minutes)
+        // Cache for settings + contexts (refreshed every 5 seconds)
         this._cache = null;
         this._cacheTime = 0;
-        this._cacheTTL = 5 * 60 * 1000; // 5 minutes
+        this._cacheTTL = 5 * 1000; // 5 seconds
     }
 
     /**
@@ -224,11 +224,12 @@ class AIService {
                     isTriggered = ctx.trigger_keywords.some(kw =>
                         lowerMsg.includes(kw.toLowerCase())
                     );
+                    console.log(`🔍 [AI] Context "${ctx.name}" keywords: ${JSON.stringify(ctx.trigger_keywords)}, msg: "${lowerMsg.substring(0, 50)}", isTriggered: ${isTriggered}`);
                 }
 
-                // Only perform API Fetch if the context is keyword-triggered, to save bandwidth
-                // or if there are no trigger keywords (always triggered)
+                // For API contexts, ALWAYS fetch if keywords match OR if no keywords are set
                 const shouldFetch = isTriggered || !ctx.trigger_keywords || ctx.trigger_keywords.length === 0;
+                console.log(`🔍 [AI] Context "${ctx.name}" type=${ctx.context_type}, shouldFetch=${shouldFetch}, isTriggered=${isTriggered}`);
 
                 // Always include context, but mark triggered ones
                 if (isTriggered) {
@@ -244,7 +245,6 @@ class AIService {
                 // If this is an API Fetch context, fetch live data
                 if (ctx.context_type === 'api' && ctx.api_config && shouldFetch) {
                     try {
-                        console.log(`📡 [AI] Triggering API Fetch for context: ${ctx.name}`);
                         const apiConfig = typeof ctx.api_config === 'string' ? JSON.parse(ctx.api_config) : ctx.api_config;
                         
                         if (apiConfig.url) {
@@ -257,12 +257,16 @@ class AIService {
                                 finalUrl = finalUrl.replace(/\{\{user_message\}\}/g, encodeURIComponent(userMessage || ''));
                             }
 
+                            console.log(`📡 [AI] Fetching API for "${ctx.name}": ${finalUrl.substring(0, 80)}...`);
+
                             const apiRes = await axios({
                                 method: apiConfig.method || 'GET',
                                 url: finalUrl,
                                 headers: apiConfig.headers || {},
                                 timeout: 5000 // 5 second strict timeout so it doesn't hang
                             });
+                            
+                            console.log(`✅ [AI] API Fetch success for "${ctx.name}": status=${apiRes.status}, dataLength=${JSON.stringify(apiRes.data).length}`);
                             
                             parts.push(`\n[LIVE API DATA FETCHED SUCCESSFULLY — THE FOLLOWING JSON IS THE ONLY SOURCE OF TRUTH. YOU MUST ANSWER QUESTIONS USING ONLY THIS DATA. DO NOT INVENT OR GUESS ANY VALUES.]`);
                             
@@ -276,8 +280,15 @@ class AIService {
                         }
                     } catch (err) {
                         console.error(`❌ [AI] API Fetch failed for ${ctx.name}:`, err.message);
+                        if (err.response) {
+                            console.error(`❌ [AI] API response status: ${err.response.status}, data: ${JSON.stringify(err.response.data).substring(0, 200)}`);
+                        } else if (err.code) {
+                            console.error(`❌ [AI] API error code: ${err.code}`);
+                        }
                         parts.push(`\n[LIVE API DATA UNAVAILABLE AT THIS TIME]`);
                     }
+                } else if (ctx.context_type === 'api' && !shouldFetch) {
+                    console.log(`⏭️ [AI] Skipping API fetch for "${ctx.name}" — no keyword match`);
                 }
             }
         }

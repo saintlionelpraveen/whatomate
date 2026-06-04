@@ -38,7 +38,7 @@ class WhatomateService {
     async createOrFetchContact(phone, name) {
         if (!this.apiUrl || !config.WHATOMATE_API_KEY) {
             console.warn('[WhatoMate] API config missing. Skipping contact sync.');
-            return null;
+            return { id: null, isNew: false };
         }
 
         const url = `${this.apiUrl}/contacts`;
@@ -47,7 +47,7 @@ class WhatomateService {
         try {
             const response = await axios.post(url, payload, { headers: this.headers });
             const contactId = this._extractContactId(response.data);
-            if (contactId) return contactId;
+            if (contactId) return { id: contactId, isNew: true };
             throw new Error('Contact ID missing in create response');
         } catch (error) {
             const errData = error.response?.data || error.message;
@@ -58,10 +58,11 @@ class WhatomateService {
                 errMsg.toLowerCase().includes('duplicate');
 
             if (isConflict) {
-                return await this._fetchContactByPhone(phone);
+                const fetchedId = await this._fetchContactByPhone(phone);
+                return { id: fetchedId, isNew: false };
             }
             console.error(`[WhatoMate] Error creating contact:`, JSON.stringify(errData));
-            return null;
+            return { id: null, isNew: false };
         }
     }
 
@@ -114,6 +115,32 @@ class WhatomateService {
         }
     }
 
+    async sendTemplateMessage(contactId, templateName, languageCode = 'en_US') {
+        if (!contactId) {
+            console.error(`[WhatoMate] ❌ Cannot send template: Missing contactId`);
+            return null;
+        }
+
+        const url = `${this.apiUrl}/contacts/${contactId}/messages`;
+        const payload = {
+            whatsapp_account: config.WHATSAPP_ACCOUNT_NAME,
+            type: 'template',
+            template: {
+                name: templateName,
+                language: { code: languageCode }
+            }
+        };
+
+        try {
+            const response = await axios.post(url, payload, { headers: this.headers });
+            console.log(`✅ [WhatoMate] Template Sync success:`, JSON.stringify(response.data));
+            return response.data;
+        } catch (error) {
+            console.error(`❌ [WhatoMate] Template Sync Error:`, JSON.stringify(error.response?.data || error.message));
+            return null;
+        }
+    }
+
     async forwardWebhook(body) {
         if (!this.apiUrl) return;
         const url = `${this.apiUrl}/webhook`;
@@ -136,7 +163,7 @@ class WhatomateService {
             }
 
             // Ensure the contact exists for outbound replies
-            const contactId = await this.createOrFetchContact(phone, name);
+            const { id: contactId } = await this.createOrFetchContact(phone, name);
             if (!contactId) {
                 console.error(`[WhatoMate] Could not resolve contact ID for ${phone}`);
                 return null;

@@ -69,6 +69,33 @@ class WhatsAppService {
             console.error(`❌ Failed to send menu to ${to}:`, error.response?.data || error.message);
         }
     }
+
+    async sendTemplateMessage(to, templateName, languageCode = 'en_US') {
+        try {
+            await axios.post(
+                this.baseUrl,
+                {
+                    messaging_product: 'whatsapp',
+                    recipient_type: 'individual',
+                    to: to,
+                    type: 'template',
+                    template: {
+                        name: templateName,
+                        language: { code: languageCode }
+                    }
+                },
+                {
+                    headers: {
+                        Authorization: `Bearer ${this.token}`,
+                        'Content-Type': 'application/json'
+                    }
+                }
+            );
+            console.log(`✅ Template ${templateName} sent to ${to}`);
+        } catch (error) {
+            console.error(`❌ Failed to send template ${templateName} to ${to}:`, error.response?.data || error.message);
+        }
+    }
 }
 
 module.exports = new WhatsAppService();
