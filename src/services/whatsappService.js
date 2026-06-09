@@ -177,6 +177,48 @@ class WhatsAppService {
             return false;
         }
     }
+
+    /**
+     * Send a media message (image, video, document/pdf, audio) to a WhatsApp number.
+     * @param {string} to - The recipient phone number
+     * @param {string} mediaType - 'image', 'video', 'document', or 'audio'
+     * @param {string} mediaUrl - A publicly accessible URL to the media file
+     * @param {string} [caption] - Optional caption for image, video, or document
+     * @param {string} [filename] - Optional filename, specifically useful for documents/PDFs
+     */
+    async sendMediaMessage(to, mediaType, mediaUrl, caption = '', filename = '') {
+        const allowedTypes = ['image', 'video', 'document', 'audio'];
+        if (!allowedTypes.includes(mediaType)) {
+            console.error(`❌ Invalid mediaType: ${mediaType}. Allowed: ${allowedTypes.join(', ')}`);
+            return false;
+        }
+
+        const mediaObject = { link: mediaUrl };
+        if (caption) mediaObject.caption = caption;
+        if (mediaType === 'document' && filename) mediaObject.filename = filename;
+
+        const payload = {
+            messaging_product: 'whatsapp',
+            recipient_type: 'individual',
+            to: to,
+            type: mediaType,
+            [mediaType]: mediaObject
+        };
+
+        try {
+            await axios.post(this.baseUrl, payload, {
+                headers: {
+                    Authorization: `Bearer ${this.token}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+            console.log(`✅ ${mediaType} sent to ${to} (URL: ${mediaUrl})`);
+            return true;
+        } catch (error) {
+            console.error(`❌ Failed to send ${mediaType} to ${to}:`, error.response?.data || error.message);
+            return false;
+        }
+    }
 }
 
 module.exports = new WhatsAppService();

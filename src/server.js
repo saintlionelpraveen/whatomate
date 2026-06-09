@@ -50,6 +50,9 @@ app.use(express.json({
 }));
 
 // ── Routes ────────────────────────────────────────────────────────────────────
+const path = require('path');
+app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+
 app.use('/api/webhook', require('./routes/webhook'));
 app.use('/webhook', require('./routes/webhook')); // keep original just in case
 

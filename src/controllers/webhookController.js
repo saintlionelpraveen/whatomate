@@ -84,8 +84,24 @@ exports.processMessage = async (req, res) => {
         const changes = entry?.changes?.[0];
         const value   = changes?.value;
 
-        // Skip status updates (delivery receipts, read receipts)
-        if (value?.statuses?.length) return;
+        // Forward status updates (delivery receipts, read receipts, errors) to the CRM
+        if (value?.statuses?.length) {
+            for (const s of value.statuses) {
+                const statusLine = `📊 [Webhook] Status: id=${s.id} status=${s.status}`;
+                if (s.errors?.length) {
+                    console.error(`${statusLine} ERROR: ${JSON.stringify(s.errors)}`);
+                } else {
+                    console.log(statusLine);
+                }
+            }
+            // Forward to CRM so it can update message delivery status
+            try {
+                await whatomateService.forwardRawWebhook(req.rawBody, req.headers);
+            } catch (fwdErr) {
+                console.error(`[Webhook] Failed to forward status to CRM:`, fwdErr.message);
+            }
+            return;
+        }
 
         // ── Forward WebRTC calls to Go backend ──
         const field = changes?.field;

@@ -220,6 +220,55 @@ class WhatomateService {
             console.error(`[WhatoMate] ❌ Outgoing Sync Failed:`, error.message);
         }
     }
+
+    /**
+     * Send a media message via WhatoMate CRM to sync it as an outbound message.
+     * @param {string} contactId - WhatoMate contact UUID
+     * @param {string} mediaType - 'image', 'video', 'document', or 'audio'
+     * @param {string} mediaUrl - The publicly accessible URL
+     * @param {string} caption - Optional caption
+     */
+    async sendMediaMessage(contactId, mediaType, mediaUrl, caption = '') {
+        if (!contactId) {
+            console.error(`[WhatoMate] ❌ Cannot send media: Missing contactId`);
+            return null;
+        }
+        if (!mediaUrl) {
+            console.error(`[WhatoMate] ❌ Cannot send media: Missing mediaUrl`);
+            return null;
+        }
+
+        const url = `${this.apiUrl}/contacts/${contactId}/messages`;
+        
+        // Construct the payload. Depending on WhatoMate CRM's API, it might support natively
+        // the media type. If not, we fallback to sending a text message containing the link.
+        // Assuming the CRM accepts identical structure to WhatsApp Cloud API or at least the type.
+        const payload = {
+            whatsapp_account: config.WHATSAPP_ACCOUNT_NAME,
+            type: mediaType,
+            content: { link: mediaUrl, caption: caption }
+        };
+
+        console.log(`\n🚀 [WhatoMate] Sending media message [outbound] to contactId: ${contactId}`);
+        
+        try {
+            const response = await axios.post(url, payload, { headers: this.headers });
+            console.log(`✅ [WhatoMate] Media Sync success:`, JSON.stringify(response.data));
+            return response.data;
+        } catch (error) {
+            console.error(`❌ [WhatoMate] Media Sync Error:`, JSON.stringify(error.response?.data || error.message));
+            
+            // Fallback: If CRM doesn't support the specific media type yet, log it as text
+            if (error.response?.status === 400) {
+                console.warn(`[WhatoMate] ⚠️ Falling back to text sync for media message...`);
+                let fallbackText = `[${mediaType.toUpperCase()} SENT]\nLink: ${mediaUrl}`;
+                if (caption) fallbackText += `\nCaption: ${caption}`;
+                return this.sendMessage(contactId, fallbackText, 'outbound');
+            }
+            
+            return null;
+        }
+    }
 }
 
 module.exports = new WhatomateService();
