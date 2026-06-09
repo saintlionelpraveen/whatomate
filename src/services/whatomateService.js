@@ -141,25 +141,57 @@ class WhatomateService {
         }
     }
 
-    async forwardWebhook(body) {
-        if (!this.apiUrl) return;
+    async forwardRawWebhook(rawBody, originalHeaders = {}) {
+        if (!this.apiUrl || !rawBody) return;
+        
         const url = `${this.apiUrl}/webhook`;
+        
         try {
-            console.log(`[WhatoMate] Forwarding raw inbound webhook to CRM...`);
-            await axios.post(url, body, {
-                headers: { 'Content-Type': 'application/json' }
-            });
+            console.log(`[WhatoMate] Forwarding raw inbound webhook to CRM at ${url}...`);
+            const headers = { 'Content-Type': 'application/json' };
+            
+            if (originalHeaders['x-hub-signature-256']) {
+                headers['x-hub-signature-256'] = originalHeaders['x-hub-signature-256'];
+            }
+            if (originalHeaders['x-hub-signature']) {
+                headers['x-hub-signature'] = originalHeaders['x-hub-signature'];
+            }
+
+            await axios.post(url, rawBody, { headers });
             console.log(`[WhatoMate] ✅ Successfully forwarded inbound webhook.`);
         } catch (error) {
             console.error(`[WhatoMate] ❌ Failed to forward webhook:`, JSON.stringify(error.response?.data || error.message));
         }
     }
 
-    async syncIncoming(phone, name, textContent, webhookBody) {
+    async forwardWebhook(body, originalHeaders = {}) {
+        if (!this.apiUrl) return;
+        
+        const url = `${this.apiUrl}/webhook`;
+        
+        try {
+            console.log(`[WhatoMate] Forwarding raw inbound webhook to CRM at ${url}...`);
+            const headers = { 'Content-Type': 'application/json' };
+            
+            if (originalHeaders['x-hub-signature-256']) {
+                headers['x-hub-signature-256'] = originalHeaders['x-hub-signature-256'];
+            }
+            if (originalHeaders['x-hub-signature']) {
+                headers['x-hub-signature'] = originalHeaders['x-hub-signature'];
+            }
+
+            await axios.post(url, body, { headers });
+            console.log(`[WhatoMate] ✅ Successfully forwarded inbound webhook.`);
+        } catch (error) {
+            console.error(`[WhatoMate] ❌ Failed to forward webhook:`, JSON.stringify(error.response?.data || error.message));
+        }
+    }
+
+    async syncIncoming(phone, name, textContent, webhookBody, originalHeaders = {}) {
         try {
             // Forward the raw webhook to the CRM to handle inbound messaging natively
             if (webhookBody) {
-                await this.forwardWebhook(webhookBody);
+                await this.forwardWebhook(webhookBody, originalHeaders);
             }
 
             // Ensure the contact exists for outbound replies

@@ -3,10 +3,20 @@ const openaiService = require('./openaiService');
 const crmService = require('./crmService');
 const whatomateService = require('./whatomateService');
 
+const { Pool } = require('pg');
+const pgPool = new Pool({
+    host: process.env.DB_HOST || '127.0.0.1',
+    port: parseInt(process.env.DB_PORT || '5433', 10),
+    user: process.env.POSTGRES_USER || 'whatomate',
+    password: process.env.POSTGRES_PASSWORD || 'whatomate',
+    database: process.env.POSTGRES_DB || 'whatomate',
+    max: 2
+});
+
 class FlowService {
     async handleIncomingMessage(fromPhone, messageObj, user, whatomateContactId = null) {
         try {
-            // Only handle text messages for now. Ignore statuses, images, etc.
+            // Only handle text and interactive messages. Ignore statuses, images, etc.
             if (messageObj.type !== 'text' && messageObj.type !== 'interactive') {
                 await whatsappService.sendTextMessage(fromPhone, "Sorry, I can only understand text messages right now. 📷❌");
                 return;
@@ -27,7 +37,45 @@ class FlowService {
             // 1. Save user message to CRM context
             await crmService.saveMessage(fromPhone, 'user', text);
 
-            // 2. Fallback to AI (Google Gemini / OpenAI)
+            // ── Dynamic WhatsApp Flow Trigger ──────────────────────────────────
+            try {
+                if (lowerText.length > 2) {
+                    const flowRes = await pgPool.query(
+                        `SELECT name, meta_flow_id FROM whatsapp_flows
+                         WHERE LOWER(name) LIKE $1
+                           AND meta_flow_id IS NOT NULL
+                           AND meta_flow_id != ''
+                           AND status = 'PUBLISHED'
+                           AND deleted_at IS NULL
+                         LIMIT 1`,
+                        [`%${lowerText}%`]
+                    );
+                    
+                    if (flowRes.rows.length > 0) {
+                        const flow = flowRes.rows[0];
+                        const sent = await whatsappService.sendFlowMessage(
+                            fromPhone,
+                            `${flow.name} 🚀`, 
+                            `Tap the button below to open ${flow.name}.`, 
+                            "Powered by Idlistack", 
+                            flow.meta_flow_id
+                        );
+                        
+                        if (sent) {
+                            console.log(`📞 Sent Flow "${flow.name}" to ${fromPhone}`);
+                            return; // Stop processing — flow sent successfully
+                        }
+                        // Flow send failed (invalid flow_id, wrong WABA, etc.)
+                        // Fall through to IVR / AI fallback below
+                        console.warn(`⚠️ Flow "${flow.name}" (${flow.meta_flow_id}) failed to send — falling through to IVR/AI`);
+                    }
+                }
+            } catch (dbErr) {
+                console.error("❌ DB Error fetching flows:", dbErr.message);
+            }
+            // ───────────────────────────────────────────────────────────────────
+
+            // 3. Fallback to AI (Google Gemini / OpenAI)
             // Fetch local history as a fallback; the AI service will prefer PG history
             console.log(`🤖 Processing text "${text}" with AI...`);
             const history = await crmService.getRecentMessages(fromPhone, 5);

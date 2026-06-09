@@ -70,9 +70,9 @@ trust_proxy = false            # Trust X-Forwarded-For / X-Real-IP headers (set 
 # Download voice models: https://huggingface.co/rhasspy/piper-voices
 # Install opusenc: apt install opus-tools (Debian/Ubuntu) / dnf install opus-tools (Fedora)
 [tts]
-# piper_binary = "/usr/local/bin/piper"
-# piper_model = "/opt/piper/models/en_US-lessac-medium.onnx"
-# opusenc_binary = "opusenc"  # defaults to finding in PATH
+piper_binary = "/usr/local/bin/piper"
+piper_model = "/opt/piper/models/en_US-lessac-medium.onnx"
+opusenc_binary = "opusenc"  # defaults to finding in PATH
 
 # WhatsApp Calling / WebRTC
 [calling]

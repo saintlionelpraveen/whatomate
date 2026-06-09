@@ -42,7 +42,12 @@ app.use((_req, res, next) => {
 });
 
 // ── Request size limit (1MB max to prevent abuse) ────────────────────────────
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ 
+    limit: '1mb',
+    verify: (req, res, buf) => {
+        req.rawBody = buf;
+    }
+}));
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.use('/api/webhook', require('./routes/webhook'));
@@ -393,6 +398,7 @@ app.post('/api/send-status', async (req, res) => {
         res.status(500).json({ status: 'error', message: 'Failed to send status' });
     }
 });
+
 
 // ── Global 404 handler ────────────────────────────────────────────────────────
 app.use((_req, res) => {

@@ -87,6 +87,45 @@ exports.processMessage = async (req, res) => {
         // Skip status updates (delivery receipts, read receipts)
         if (value?.statuses?.length) return;
 
+        // ── Forward WebRTC calls to Go backend ──
+        const field = changes?.field;
+
+        // Meta recently renamed `webrtc` to `calls`. The Go backend expects `webrtc`.
+        if (field === 'calls' || value?.calls) {
+            console.log(`\n[Webhook] 📞 Translating Meta 'calls' event to 'webrtc' format...`);
+            
+            const translatedBody = JSON.parse(JSON.stringify(body));
+            const change = translatedBody.entry[0].changes[0];
+            
+            if (change.field === 'calls') change.field = 'webrtc';
+            if (change.value.calls) {
+                change.value.webrtc = change.value.calls;
+                delete change.value.calls;
+            }
+
+            const translatedRawBody = Buffer.from(JSON.stringify(translatedBody));
+            
+            // Re-sign or strip signature to avoid HMAC failure on the modified payload
+            if (process.env.APP_SECRET) {
+                const crypto = require('crypto');
+                const newSig = 'sha256=' + crypto.createHmac('sha256', process.env.APP_SECRET).update(translatedRawBody).digest('hex');
+                req.headers['x-hub-signature-256'] = newSig;
+            } else {
+                delete req.headers['x-hub-signature-256'];
+                delete req.headers['x-hub-signature'];
+            }
+
+            await whatomateService.forwardRawWebhook(translatedRawBody, req.headers);
+            return;
+        }
+
+        // Fallback for legacy format
+        if (field === 'webrtc' || field === 'call' || value?.webrtc || value?.call) {
+            console.log(`\n[Webhook] 📞 Received Legacy Call event (field: ${field})! Forwarding raw bytes...`);
+            await whatomateService.forwardRawWebhook(req.rawBody, req.headers);
+            return;
+        }
+
         const message = value?.messages?.[0];
         const contact = value?.contacts?.[0];
 
@@ -129,7 +168,7 @@ exports.processMessage = async (req, res) => {
 
         // 2. WhatoMate Sync — forward raw webhook + resolve contact ID
         const whatomateContactId = await whatomateService.syncIncoming(
-            fromPhone, contactName, textContent, body
+            fromPhone, contactName, textContent, body, req.headers
         );
 
         if (!whatomateContactId) {
