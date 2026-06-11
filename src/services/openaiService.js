@@ -322,7 +322,17 @@ class AIService {
         const settings = await this._getSettings();
         const systemPrompt = await this._buildSystemPrompt(settings, userMessage);
 
-        const history = contextMessages;
+        let history = [];
+        if (settings.includeHistory) {
+            if (contextMessages && contextMessages.length > 0) {
+                history = contextMessages.slice(-settings.historyLimit);
+            } else if (phoneNumber) {
+                const pgHistory = await this.getConversationHistory(phoneNumber, settings.historyLimit);
+                if (pgHistory && pgHistory.length > 0) {
+                    history = pgHistory;
+                }
+            }
+        }
 
         // Log system prompt for debugging
         console.log(`📝 [AI] System prompt: ${systemPrompt.length} chars, ${settings.contexts.length} contexts loaded`);

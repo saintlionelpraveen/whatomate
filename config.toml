@@ -50,6 +50,9 @@ s3_region = ""
 s3_key = ""
 s3_secret = ""
 
+[media]
+max_upload_size = 80    # Max file size in MB
+
 # Auth cookie settings (tokens are stored in httpOnly cookies)
 [cookie]
 domain = ""    # Cookie domain (e.g., ".example.com"). Empty = current host only.

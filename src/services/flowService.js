@@ -78,7 +78,7 @@ class FlowService {
             // 3. Fallback to AI (Google Gemini / OpenAI)
             // Fetch local history as a fallback; the AI service will prefer PG history
             console.log(`🤖 Processing text "${text}" with AI...`);
-            const history = await crmService.getRecentMessages(fromPhone, 5);
+            const history = await crmService.getRecentMessages(fromPhone, 40);
             const aiReply = await openaiService.generateReply(text, history, fromPhone);
 
             // Send to user via WhatsApp + sync to CRM
@@ -97,10 +97,6 @@ class FlowService {
         }
     }
 
-    /**
-     * Send a reply to the user via WhatsApp AND sync to both CRM databases.
-     * This is the single point where all outgoing messages are dispatched.
-     */
     async _sendAndSync(toPhone, message, whatomateContactId) {
         // 1. Save to local SQLite CRM for conversation context
         await crmService.saveMessage(toPhone, 'bot', message);
@@ -108,10 +104,18 @@ class FlowService {
         // 2. Send the message.
         // If WhatoMate CRM is available, sending to the CRM automatically dispatches
         // the message to WhatsApp via their API. Otherwise, send directly.
+        let sentViaCrm = false;
         if (whatomateContactId) {
-            await whatomateService.sendOutgoingMessage(whatomateContactId, message);
-        } else {
+            sentViaCrm = await whatomateService.sendOutgoingMessage(whatomateContactId, message);
+        }
+        
+        if (!sentViaCrm) {
+            // CRM API failed or contactId is null.
+            // Send directly via WhatsApp
             await whatsappService.sendTextMessage(toPhone, message);
+            
+            // AND ensure it's logged in CRM DB
+            await whatomateService.logMessageDirectlyToDB(toPhone, message, 'outbound');
         }
     }
 

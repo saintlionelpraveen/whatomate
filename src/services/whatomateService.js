@@ -1,5 +1,14 @@
 const axios = require('axios');
 const config = require('../config');
+const { Pool } = require('pg');
+
+const pgPool = new Pool({
+    host: process.env.DB_HOST || '127.0.0.1',
+    port: parseInt(process.env.DB_PORT || '5433', 10),
+    user: process.env.POSTGRES_USER || 'whatomate',
+    password: process.env.POSTGRES_PASSWORD || 'whatomate',
+    database: process.env.POSTGRES_DB || 'whatomate',
+});
 
 class WhatomateService {
     constructor() {
@@ -213,11 +222,42 @@ class WhatomateService {
         try {
             if (!message) {
                 console.warn('[WhatoMate] sendOutgoingMessage called with empty message — skipping.');
-                return;
+                return false;
             }
-            await this.sendMessage(contactId, message, 'outbound');
+            const res = await this.sendMessage(contactId, message, 'outbound');
+            return !!res;
         } catch (error) {
             console.error(`[WhatoMate] ❌ Outgoing Sync Failed:`, error.message);
+            return false;
+        }
+    }
+
+    async logMessageDirectlyToDB(phone, messageText, direction = 'outbound') {
+        try {
+            // Find contact
+            const contactRes = await pgPool.query('SELECT id, organization_id FROM contacts WHERE phone_number = $1 LIMIT 1', [phone]);
+            if (contactRes.rows.length === 0) {
+                console.warn(`[WhatoMate] ⚠️ Cannot log message to DB: Contact not found for ${phone}`);
+                return;
+            }
+            const contact = contactRes.rows[0];
+            
+            const crypto = require('crypto');
+            const msgId = crypto.randomUUID();
+            const now = new Date();
+            
+            await pgPool.query(`
+                INSERT INTO messages (
+                    id, created_at, updated_at, organization_id, contact_id, 
+                    direction, message_type, content, status, whats_app_account
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            `, [
+                msgId, now, now, contact.organization_id, contact.id,
+                direction, 'text', messageText, 'delivered', config.WHATSAPP_ACCOUNT_NAME || 'WhatoMate Bot'
+            ]);
+            console.log(`[WhatoMate] ✅ Successfully logged message directly to DB for ${phone}`);
+        } catch (e) {
+            console.error(`[WhatoMate] ❌ Failed to log directly to DB:`, e.message);
         }
     }
 
