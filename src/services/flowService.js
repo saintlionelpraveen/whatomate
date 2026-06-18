@@ -275,36 +275,7 @@ class FlowService {
         }
     }
 
-    async sendMenu(to, whatomateContactId = null) {
-        const header = "Welcome to Dress Shop! 👗";
-        const body = "Please choose an option below:";
-        const footer = "Powered by Tech4Good Community";
-        const buttons = [
-            { id: "btn_products", title: "Products" },
-            { id: "btn_pricing", title: "Pricing" },
-            { id: "btn_purchase", title: "Purchase" }
-        ];
 
-        await whatsappService.sendInteractiveButtons(to, header, body, footer, buttons);
-        await crmService.saveMessage(to, 'bot', 'Sent Interactive Menu');
-    }
-
-    async sendPurchaseMenu(to, whatomateContactId = null) {
-        const header = "Ready to Shop? 🛍️";
-        const body = "What kind of dress are you looking for today?";
-        const footer = "Select a category to see options";
-        const buttons = [
-            { id: "cat_casual", title: "Casual Wear" },
-            { id: "cat_formal", title: "Formal Wear" },
-            { id: "cat_party", title: "Party Wear" }
-        ];
-
-        await whatsappService.sendInteractiveButtons(to, header, body, footer, buttons);
-        await crmService.saveMessage(to, 'bot', 'Sent Purchase Menu');
-        
-        const reply = "I've sent you some categories to choose from! Once you select one, I'll show you our bestsellers. 👗✨";
-        await whatomateService.sendOutgoingMessage(whatomateContactId, reply);
-    }
 }
 
 module.exports = new FlowService();
