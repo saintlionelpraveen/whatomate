@@ -169,6 +169,9 @@ exports.processMessage = async (req, res) => {
                 message.interactive?.button_reply?.title ||
                 message.interactive?.list_reply?.title  ||
                 '';
+        } else if (message.type === 'button') {
+            // Template Quick Reply buttons send type='button'
+            textContent = message.button?.text || message.button?.payload || '';
         } else {
             textContent = `[Received ${message.type} message]`;
         }

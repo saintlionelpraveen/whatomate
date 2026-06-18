@@ -219,6 +219,53 @@ class WhatsAppService {
             return false;
         }
     }
+
+    /**
+     * Send an interactive CTA URL button that opens a webpage when tapped.
+     * @param {string} to - Recipient phone number
+     * @param {string} header - Header text
+     * @param {string} body - Body text
+     * @param {string} footer - Footer text
+     * @param {string} buttonText - Text displayed on the button (max 20 chars)
+     * @param {string} url - The URL to open when the button is tapped
+     */
+    async sendCTAUrlButton(to, header, body, footer, buttonText, url) {
+        try {
+            await axios.post(
+                this.baseUrl,
+                {
+                    messaging_product: 'whatsapp',
+                    recipient_type: 'individual',
+                    to: to,
+                    type: 'interactive',
+                    interactive: {
+                        type: 'cta_url',
+                        header: { type: 'text', text: header },
+                        body: { text: body },
+                        footer: { text: footer },
+                        action: {
+                            name: 'cta_url',
+                            parameters: {
+                                display_text: buttonText,
+                                url: url
+                            }
+                        }
+                    }
+                },
+                {
+                    headers: {
+                        Authorization: `Bearer ${this.token}`,
+                        'Content-Type': 'application/json'
+                    }
+                }
+            );
+            console.log(`✅ CTA URL button sent to ${to}: ${url}`);
+            return true;
+        } catch (error) {
+            console.error(`❌ Failed to send CTA URL to ${to}:`, error.response?.data || error.message);
+            return false;
+        }
+    }
 }
 
 module.exports = new WhatsAppService();
