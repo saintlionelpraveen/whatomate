@@ -54,7 +54,8 @@ const path = require('path');
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 app.use('/api/webhook', require('./routes/webhook'));
-app.use('/webhook', require('./routes/webhook')); // keep original just in case
+// NOTE: Only one webhook route is registered to prevent duplicate processing.
+// Make sure your Meta webhook URL in the App Dashboard points to: https://<your-domain>/api/webhook
 
 // ── Health check endpoint ────────────────────────────────────────────────────
 const aiService = require('./services/openaiService');

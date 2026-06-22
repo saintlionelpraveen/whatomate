@@ -198,10 +198,12 @@ class WhatomateService {
 
     async syncIncoming(phone, name, textContent, webhookBody, originalHeaders = {}) {
         try {
-            // Forward the raw webhook to the CRM to handle inbound messaging natively
-            if (webhookBody) {
-                await this.forwardWebhook(webhookBody, originalHeaders);
-            }
+            // NOTE: We intentionally do NOT forward the raw webhook to the CRM here.
+            // Forwarding causes the CRM to process the message and send its own auto-reply,
+            // resulting in duplicate messages to the user. The CRM is only used to:
+            //   1. Resolve/create the contact
+            //   2. Log outbound messages (handled by sendOutgoingMessage)
+            // Status updates and call events are forwarded separately in webhookController.
 
             // Ensure the contact exists for outbound replies
             const { id: contactId } = await this.createOrFetchContact(phone, name);

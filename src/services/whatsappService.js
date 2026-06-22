@@ -134,8 +134,35 @@ class WhatsAppService {
      * Trigger a native WhatsApp Flow (like "IDLISTACK Onboarding").
      * @returns {boolean} true if the flow was sent successfully, false on failure.
      */
-    async sendFlowMessage(to, header, body, footer, flowId, flowToken = "UNIQUE_TOKEN") {
+    async sendFlowMessage(to, header, body, footer, flowId, flowToken = "UNIQUE_TOKEN", flowCta = "Open Flow", flowScreen = "SCREEN_A") {
         try {
+            // Build interactive object — only include header/footer if non-empty
+            // WhatsApp API rejects empty header.text or footer.text (min length 1)
+            const interactive = {
+                type: "flow",
+                body: { text: body || "Tap below to continue" },
+                action: {
+                    name: "flow",
+                    parameters: {
+                        flow_message_version: "3",
+                        flow_token: flowToken,
+                        flow_id: flowId,
+                        flow_cta: flowCta || "Open Flow",
+                        flow_action: "navigate",
+                        flow_action_payload: {
+                            screen: flowScreen // Starting screen of your flow
+                        }
+                    }
+                }
+            };
+
+            if (header && header.trim()) {
+                interactive.header = { type: "text", text: header };
+            }
+            if (footer && footer.trim()) {
+                interactive.footer = { text: footer };
+            }
+
             await axios.post(
                 this.baseUrl,
                 {
@@ -143,25 +170,7 @@ class WhatsAppService {
                     recipient_type: "individual",
                     to: to,
                     type: "interactive",
-                    interactive: {
-                        type: "flow",
-                        header: { type: "text", text: header },
-                        body: { text: body },
-                        footer: { text: footer },
-                        action: {
-                            name: "flow",
-                            parameters: {
-                                flow_message_version: "3",
-                                flow_token: flowToken,
-                                flow_id: flowId,
-                                flow_cta: "Open Flow",
-                                flow_action: "navigate",
-                                flow_action_payload: {
-                                    screen: "INIT" // Starting screen of your flow
-                                }
-                            }
-                        }
-                    }
+                    interactive
                 },
                 {
                     headers: {
