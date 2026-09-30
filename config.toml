@@ -19,7 +19,7 @@ base_path = ""  # Set to "/subpath" if behind nginx proxy pass
 allowed_origins = ""  # Comma-separated CORS origins (e.g., "https://app.example.com,https://admin.example.com"). Empty = allow all (dev only).
 
 [database]
-host = "db"  # Use "localhost" for local development
+host = "postgres-db"  # Docker service name
 port = 5432
 user = "whatomate"
 password = "whatomate"
@@ -30,7 +30,7 @@ max_idle_conns = 5
 conn_max_lifetime = 300
 
 [redis]
-host = "redis"  # Use "localhost" for local development
+host = "redis"  # Docker service name
 port = 6379
 username = ""  # Redis ACL username (Redis 6+). Leave empty to use the default user.
 password = ""
@@ -87,7 +87,7 @@ transfer_timeout_secs = 120   # How long to wait for agent to accept transfer
 recording_enabled = false      # Record calls to S3 (requires [storage] s3 config)
 udp_port_min = 10000          # WebRTC UDP port range start
 udp_port_max = 10100          # WebRTC UDP port range end
-public_ip = "14.195.30.186"      # Public IP for NAT mapping (required on AWS/cloud)
+public_ip = "150.241.247.89"      # Public IP for NAT mapping (required on AWS/cloud)
 relay_only = false           # Force all media through TURN relay (no direct UDP needed)
 
 # ICE servers for WebRTC NAT traversal
@@ -123,5 +123,5 @@ full_name = "Admin"
 [ai]
 provider = "google"
 api_key = "AIzaSyA6vaULHtiKwqFjGTznCLCJdnYqhFcFwxk"
-model = "gemini-1.5-flash"
+model = "gemini-2.5-flash"
 max_tokens = 500
