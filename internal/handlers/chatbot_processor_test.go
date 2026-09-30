@@ -848,3 +848,71 @@ func TestMatchFlowTrigger_Match(t *testing.T) {
 // =============================================================================
 // evaluateExpression (package-level, not on App)
 // =============================================================================
+
+func TestNormalizeGeminiModel(t *testing.T) {
+	assert.Equal(t, "gemini-2.5-flash", normalizeGeminiModel(""))
+	assert.Equal(t, "gemini-2.5-flash", normalizeGeminiModel("gemini-2.0-flash"))
+	assert.Equal(t, "gemini-2.5-flash", normalizeGeminiModel("gemini-2.0-flash-lite"))
+	assert.Equal(t, "gemini-2.5-flash", normalizeGeminiModel("gemini-1.5-flash"))
+	assert.Equal(t, "gemini-2.5-flash", normalizeGeminiModel("gemini-1.5-pro"))
+	assert.Equal(t, "gemini-2.5-flash", normalizeGeminiModel("models/gemini-2.0-flash"))
+	assert.Equal(t, "gemini-2.5-flash", normalizeGeminiModel("gemini-2.5-flash"))
+	assert.Equal(t, "gemini-3.8-flash", normalizeGeminiModel("gemini-3.8-flash"))
+}
+
+func TestBuildSystemPromptWithGuardrails(t *testing.T) {
+	prompt := buildSystemPromptWithGuardrails("Custom prompt", "Context data")
+	assert.Contains(t, prompt, "CRITICAL OPERATING BOUNDARIES (STRICT ENFORCEMENT)")
+	assert.Contains(t, prompt, "Custom prompt")
+	assert.Contains(t, prompt, "Context data")
+}
+
+func TestGenerateAIResponse_DisabledContextTurnsAIOff(t *testing.T) {
+	app := newProcessorTestApp(t)
+	org, account := createProcessorTestOrg(t, app)
+	contact := testutil.CreateTestContact(t, app.DB, org.ID)
+
+	session := &models.ChatbotSession{
+		BaseModel:       models.BaseModel{ID: uuid.New()},
+		OrganizationID:  org.ID,
+		ContactID:       contact.ID,
+		WhatsAppAccount: account.Name,
+		PhoneNumber:     contact.PhoneNumber,
+		Status:          models.SessionStatusActive,
+		StartedAt:       time.Now(),
+		LastActivityAt:  time.Now(),
+	}
+	require.NoError(t, app.DB.Create(session).Error)
+
+	settings := &models.ChatbotSettings{
+		OrganizationID: org.ID,
+		AI: models.AIConfig{
+			Enabled:  true,
+			Provider: models.AIProviderGoogle,
+			Model:    "gemini-2.5-flash",
+			APIKey:   "test_key",
+		},
+	}
+
+	// Case 1: No contexts at all in DB -> AI should be OFF (return empty string and no error)
+	resp, err := app.generateAIResponse(settings, session, "What is your pricing?")
+	require.NoError(t, err)
+	assert.Equal(t, "", resp)
+
+	// Case 2: Context exists but is_enabled = false -> AI should be OFF
+	disabledCtx := &models.AIContext{
+		BaseModel:      models.BaseModel{ID: uuid.New()},
+		OrganizationID: org.ID,
+		Name:           "Pricing Guide",
+		ContextType:    models.ContextTypeStatic,
+		StaticContent:  "Pricing is $10/mo",
+		IsEnabled:      true, // create as true first
+	}
+	require.NoError(t, app.DB.Create(disabledCtx).Error)
+	require.NoError(t, app.DB.Model(disabledCtx).Update("is_enabled", false).Error)
+	app.InvalidateAIContextsCache(org.ID)
+
+	respDisabled, errDisabled := app.generateAIResponse(settings, session, "What is your pricing?")
+	require.NoError(t, errDisabled)
+	assert.Equal(t, "", respDisabled)
+}

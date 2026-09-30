@@ -34,7 +34,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Switch } from '@/components/ui/switch'
-import { widgetsService, type DashboardWidget, type WidgetData, type LayoutItem } from '@/services/api'
+import { widgetsService, chatbotService, flowsService, type DashboardWidget, type WidgetData, type LayoutItem } from '@/services/api'
 import { useAuthStore } from '@/stores/auth'
 import {
   MessageSquare,
@@ -103,6 +103,7 @@ const dataSources = ref<Array<{ name: string; label: string; fields: string[] }>
 const metrics = ref<string[]>([])
 const displayTypes = ref<string[]>([])
 const operators = ref<Array<{ value: string; label: string }>>([])
+const availableFlows = ref<Array<{ id: string; name: string }>>([])
 
 const widgetForm = ref({
   name: '',
@@ -343,6 +344,8 @@ const getWidgetIcon = (dataSource: string) => {
       return Send
     case 'transfers':
       return Users
+    case 'flows':
+      return Workflow
     default:
       return BarChart3
   }
@@ -476,6 +479,13 @@ const availableFields = computed(() => {
   return source?.fields || []
 })
 
+const formatFieldLabel = (field: string) => {
+  if (widgetForm.value.data_source === 'flows') {
+    return field.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
+  }
+  return field
+}
+
 // Fetch data
 const fetchWidgets = async () => {
   try {
@@ -521,11 +531,22 @@ const fetchDashboardData = async () => {
   try {
     await Promise.all([
       fetchWidgets(),
-      fetchDataSources()
+      fetchDataSources(),
+      fetchFlows()
     ])
     await fetchWidgetData()
   } finally {
     isLoading.value = false
+  }
+}
+
+const fetchFlows = async () => {
+  try {
+    const response = await flowsService.list({ limit: 100 })
+    const data = (response.data as any).data || response.data
+    availableFlows.value = data.flows || []
+  } catch (error) {
+    console.error('Failed to load flows:', error)
   }
 }
 
@@ -608,7 +629,24 @@ const saveWidget = async () => {
   }
 
   // Clean up empty filters
-  const cleanFilters = widgetForm.value.filters.filter(f => f.field && f.operator && f.value)
+  let cleanFilters = widgetForm.value.filters.filter(f => f.field && f.operator && f.value)
+  
+  if (widgetForm.value.data_source === 'flows' && widgetForm.value.config?.flow_id) {
+    // Check if filter exists
+    const hasFlowFilter = cleanFilters.some(f => f.field === 'current_flow_id')
+    if (!hasFlowFilter) {
+      cleanFilters.push({
+        field: 'current_flow_id',
+        operator: 'equals',
+        value: widgetForm.value.config.flow_id
+      })
+    } else {
+      const filter = cleanFilters.find(f => f.field === 'current_flow_id')
+      if (filter) {
+        filter.value = widgetForm.value.config.flow_id
+      }
+    }
+  }
 
   // Build config
   let config: Record<string, any> = { ...widgetForm.value.config }
@@ -1136,6 +1174,26 @@ onMounted(() => {
             </Select>
           </div>
 
+          <!-- Flow selection (visible when data source is flows) -->
+          <div v-if="widgetForm.data_source === 'flows'" class="space-y-2">
+            <Label class="text-white/70 light:text-gray-700">{{ $t('dashboard.selectFlow') }} *</Label>
+            <Select :model-value="widgetForm.config.flow_id" @update:model-value="(val) => widgetForm.config.flow_id = String(val)">
+              <SelectTrigger class="bg-white/[0.04] border-white/[0.1] text-white light:bg-white light:border-gray-300 light:text-gray-900">
+                <SelectValue placeholder="Select a flow" />
+              </SelectTrigger>
+              <SelectContent class="bg-[#1a1a1a] border-white/[0.08] light:bg-white light:border-gray-200">
+                <SelectItem
+                  v-for="flow in availableFlows"
+                  :key="flow.id"
+                  :value="flow.id"
+                  class="text-white/70 focus:bg-white/[0.08] focus:text-white light:text-gray-700 light:focus:bg-gray-100"
+                >
+                  {{ flow.name }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
           <!-- Metric (hidden for shortcuts and table) -->
           <div v-if="widgetForm.display_type !== 'shortcuts' && widgetForm.display_type !== 'table'" class="space-y-2">
             <Label class="text-white/70 light:text-gray-700">{{ $t('dashboard.metric') }}</Label>
@@ -1207,7 +1265,7 @@ onMounted(() => {
                   :value="field"
                   class="text-white/70 focus:bg-white/[0.08] focus:text-white light:text-gray-700 light:focus:bg-gray-100"
                 >
-                  {{ field }}
+                  {{ formatFieldLabel(field) }}
                 </SelectItem>
               </SelectContent>
             </Select>
@@ -1256,17 +1314,17 @@ onMounted(() => {
                   <SelectTrigger class="w-full bg-white/[0.04] border-white/[0.1] text-white text-sm light:bg-white light:border-gray-300 light:text-gray-900">
                     <SelectValue :placeholder="$t('dashboard.field')" />
                   </SelectTrigger>
-                  <SelectContent class="bg-[#1a1a1a] border-white/[0.08] light:bg-white light:border-gray-200">
-                    <SelectItem
-                      v-for="field in availableFields"
-                      :key="field"
-                      :value="field"
-                      class="text-white/70 focus:bg-white/[0.08] focus:text-white light:text-gray-700 light:focus:bg-gray-100"
-                    >
-                      {{ field }}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
+                    <SelectContent class="bg-[#1a1a1a] border-white/[0.08] light:bg-white light:border-gray-200">
+                      <SelectItem
+                        v-for="field in availableFields"
+                        :key="field"
+                        :value="field"
+                        class="text-white/70 focus:bg-white/[0.08] focus:text-white light:text-gray-700 light:focus:bg-gray-100"
+                      >
+                        {{ formatFieldLabel(field) }}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
               </div>
               <div class="w-36">
                 <Select :model-value="filter.operator" @update:model-value="(val) => filter.operator = String(val)">

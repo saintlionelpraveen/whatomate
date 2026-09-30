@@ -1146,6 +1146,8 @@ async function sendTemplateMessage() {
     templateHeaderParamValue.value = ''
     clearTemplateHeaderMedia()
     templateButtonUrlParams.value = []
+    await nextTick()
+    scrollToBottom()
   } catch (error: any) {
     const message = error.response?.data?.message || t('chat.templateSendFailed')
     toast.error(message)

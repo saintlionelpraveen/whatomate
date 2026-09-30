@@ -71,6 +71,15 @@ func (a *App) runChatGraph(
 	buttonID string,
 	flowResponseData map[string]any,
 ) error {
+	if session.ForceReset {
+		session.CurrentStep = ""
+		session.SessionData = models.JSONB{
+			"_flow_id":   flow.ID.String(),
+			"_flow_name": flow.Name,
+		}
+		session.ForceReset = false
+	}
+
 	graph, err := parseChatGraph(flow.Graph)
 	if err != nil {
 		return fmt.Errorf("parse chat graph: %w", err)
@@ -816,7 +825,14 @@ func (a *App) execChatGotoFlow(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome, e
 			"node", node.ID, "flow_id", targetID)
 		return nodeOutcome{}, nil
 	}
-	if target.WhatsAppAccount != ctx.session.WhatsAppAccount {
+	// Allow empty WhatsAppAccount on the target (org-level flows that
+	// apply to all accounts — the CreateChatbotFlow handler doesn't
+	// always populate this field). Only refuse when both are non-empty
+	// and differ, which means the flow was explicitly scoped to a
+	// different account.
+	if target.WhatsAppAccount != "" &&
+		ctx.session.WhatsAppAccount != "" &&
+		target.WhatsAppAccount != ctx.session.WhatsAppAccount {
 		a.Log.Warn("goto_flow target belongs to a different WA account; refusing",
 			"node", node.ID, "target_account", target.WhatsAppAccount,
 			"session_account", ctx.session.WhatsAppAccount)
@@ -871,6 +887,29 @@ func (a *App) execChatWhatsAppFlow(node *ChatNode, ctx *chatNodeCtx) (nodeOutcom
 			ctx.session.SessionData = models.JSONB{}
 		}
 		maps.Copy(ctx.session.SessionData, ctx.flowResponseData)
+
+		// Insert into whatsapp_flow_submissions so it appears in the dashboard
+		metaFlowID := stringFromConfig(node.Config, "flow_id")
+		if metaFlowID != "" {
+			var waFlow models.WhatsAppFlow
+			if err := a.DB.Where("meta_flow_id = ?", metaFlowID).First(&waFlow).Error; err == nil {
+				submissionID := uuid.New()
+				now := time.Now()
+				
+				// Serialize flowResponseData
+				respBytes, err := json.Marshal(ctx.flowResponseData)
+				if err == nil {
+					err = a.DB.Exec(`
+						INSERT INTO whatsapp_flow_submissions (id, phone_number, response_data, flow_id, organization_id, created_at) 
+						VALUES (?, ?, ?, ?, ?, ?)
+					`, submissionID, ctx.session.PhoneNumber, string(respBytes), waFlow.ID, ctx.session.OrganizationID, now).Error
+					if err != nil {
+						a.Log.Error("Failed to save whatsapp_flow_submission", "error", err, "phone", ctx.session.PhoneNumber)
+					}
+				}
+			}
+		}
+
 		return nodeOutcome{outcome: "default"}, nil
 	}
 
@@ -884,6 +923,15 @@ func (a *App) execChatWhatsAppFlow(node *ChatNode, ctx *chatNodeCtx) (nodeOutcom
 	body := processTemplate(stringFromConfig(node.Config, "body", "message", "text"), ctx.session.SessionData)
 	header := processTemplate(stringFromConfig(node.Config, "header"), ctx.session.SessionData)
 	cta := processTemplate(stringFromConfig(node.Config, "cta"), ctx.session.SessionData)
+
+	// WhatsApp requires a non-empty body; fall back to the node label or
+	// a generic string when the author hasn't supplied one.
+	if body == "" {
+		body = node.Label
+	}
+	if body == "" {
+		body = "Please open the form below."
+	}
 
 	// Look up the first screen — same pattern as the legacy executor so
 	// existing WhatsAppFlow rows continue to work.
@@ -910,7 +958,11 @@ func (a *App) execChatWhatsAppFlow(node *ChatNode, ctx *chatNodeCtx) (nodeOutcom
 
 	flowToken := fmt.Sprintf("chatbot_%s_%s_%d", ctx.session.ID.String(), node.ID, time.Now().UnixNano())
 	if err := a.sendAndSaveFlowMessage(ctx.account, ctx.contact, flowID, header, body, cta, flowToken, firstScreen); err != nil {
-		return nodeOutcome{}, fmt.Errorf("send whatsapp_flow: %w", err)
+		// Log the error but don't kill the session — advance via default
+		// so the conversation doesn't dead-end for the user.
+		a.Log.Error("whatsapp_flow send failed; advancing via default edge",
+			"node", node.ID, "flow_id", flowID, "session", ctx.session.ID, "error", err)
+		return nodeOutcome{outcome: "default"}, nil
 	}
 	a.logSessionMessage(ctx.session.ID, models.DirectionOutgoing, body, node.ID)
 	return nodeOutcome{yield: true}, nil

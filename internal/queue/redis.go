@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -129,7 +130,7 @@ func NewRedisConsumer(client *redis.Client, log logf.Logger) (*RedisConsumer, er
 	// Create consumer group if it doesn't exist
 	ctx := context.Background()
 	err := client.XGroupCreateMkStream(ctx, StreamName, ConsumerGroup, "0").Err()
-	if err != nil && err.Error() != "BUSYGROUP Consumer Group name already exists" {
+	if err != nil && !strings.Contains(err.Error(), "BUSYGROUP") {
 		return nil, fmt.Errorf("failed to create consumer group: %w", err)
 	}
 
@@ -170,6 +171,15 @@ func (c *RedisConsumer) Consume(ctx context.Context, handler JobHandler) error {
 			}
 			if ctx.Err() != nil {
 				return ctx.Err()
+			}
+			if strings.Contains(err.Error(), "NOGROUP") {
+				c.log.Info("Consumer group missing, attempting to recreate...")
+				createErr := c.client.XGroupCreateMkStream(ctx, StreamName, ConsumerGroup, "0").Err()
+				if createErr != nil && !strings.Contains(createErr.Error(), "BUSYGROUP") {
+					c.log.Error("Failed to recreate consumer group", "error", createErr)
+				} else {
+					continue // Successfully created or already exists
+				}
 			}
 			c.log.Error("Failed to read from stream", "error", err)
 			time.Sleep(time.Second) // Back off on error

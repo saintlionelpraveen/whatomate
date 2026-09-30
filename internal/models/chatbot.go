@@ -227,6 +227,7 @@ type ChatbotSession struct {
 	StartedAt       time.Time     `gorm:"autoCreateTime" json:"started_at"`
 	LastActivityAt  time.Time     `json:"last_activity_at"`
 	CompletedAt     *time.Time    `json:"completed_at,omitempty"`
+	ForceReset      bool          `gorm:"-" json:"-"`
 
 	// Relations
 	Organization *Organization           `gorm:"foreignKey:OrganizationID" json:"organization,omitempty"`

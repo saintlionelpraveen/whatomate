@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -123,7 +124,8 @@ var widgetDataSources = map[string][]string{
 	"contacts":  {"whatsapp_account", "is_read"},
 	"campaigns": {"status", "message_status"},
 	"transfers": {"status", "source"},
-	"sessions":  {"status"},
+	"sessions":  {"status", "current_flow_id"},
+	"flows":     {"status", "current_flow_id"},
 }
 
 // Available metrics
@@ -287,7 +289,9 @@ func (a *App) CreateWidget(r *fastglue.Request) error {
 	// Validate group_by_field if provided (only for non-static types)
 	if req.GroupByField != "" && !staticDisplayTypes[displayType] {
 		fields := widgetDataSources[req.DataSource]
-		if !contains(fields, req.GroupByField) {
+		isValidStatic := contains(fields, req.GroupByField)
+		isValidDynamic := (req.DataSource == "flows" || req.DataSource == "sessions") && isValidJSONFieldName(req.GroupByField)
+		if !isValidStatic && !isValidDynamic {
 			return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid group by field for this data source", nil, "")
 		}
 	}
@@ -438,7 +442,9 @@ func (a *App) UpdateWidget(r *fastglue.Request) error {
 			ds = req.DataSource
 		}
 		fields := widgetDataSources[ds]
-		if !contains(fields, req.GroupByField) {
+		isValidStatic := contains(fields, req.GroupByField)
+		isValidDynamic := (ds == "flows" || ds == "sessions") && isValidJSONFieldName(req.GroupByField)
+		if !isValidStatic && !isValidDynamic {
 			return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid group by field for this data source", nil, "")
 		}
 	}
@@ -568,12 +574,52 @@ func (a *App) SaveWidgetLayout(r *fastglue.Request) error {
 
 // GetWidgetDataSources returns available data sources and their filterable fields
 func (a *App) GetWidgetDataSources(r *fastglue.Request) error {
+	orgID, err := a.getOrgID(r)
+	if err != nil {
+		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
+	}
+
+	// Fetch dynamic fields from session_data for sessions
+	var sessionDynamicFields []string
+	a.DB.Raw(`
+		SELECT DISTINCT jsonb_object_keys(session_data) 
+		FROM chatbot_sessions 
+		WHERE organization_id = ? AND session_data IS NOT NULL AND session_data::text != '{}'
+	`, orgID).Scan(&sessionDynamicFields)
+
+	// Fetch dynamic fields from response_data for flows
+	var flowDynamicFields []string
+	a.DB.Raw(`
+		SELECT DISTINCT jsonb_object_keys(response_data) 
+		FROM whatsapp_flow_submissions 
+		WHERE organization_id = ? AND response_data IS NOT NULL AND response_data::text != '{}'
+	`, orgID).Scan(&flowDynamicFields)
+
 	sources := make([]map[string]any, 0)
 	for source, fields := range widgetDataSources {
+		sourceFields := make([]string, len(fields))
+		copy(sourceFields, fields)
+
+		if source == "sessions" {
+			for _, df := range sessionDynamicFields {
+				// skip internal fields
+				if len(df) > 0 && df[0] != '_' {
+					sourceFields = append(sourceFields, df)
+				}
+			}
+		} else if source == "flows" {
+			for _, df := range flowDynamicFields {
+				// skip internal fields
+				if len(df) > 0 && df[0] != '_' {
+					sourceFields = append(sourceFields, df)
+				}
+			}
+		}
+
 		sources = append(sources, map[string]any{
 			"name":   source,
 			"label":  formatLabel(source),
-			"fields": fields,
+			"fields": sourceFields,
 		})
 	}
 
@@ -817,9 +863,9 @@ func (a *App) executeWidgetQuery(orgID uuid.UUID, widget models.Widget, fromStr,
 		currentValue = a.queryTransfers(orgID, widget.Metric, widget.Field, filters, periodStart, periodEnd)
 		previousValue = a.queryTransfers(orgID, widget.Metric, widget.Field, filters, previousPeriodStart, previousPeriodEnd)
 
-	case "sessions":
-		currentValue = a.querySessions(orgID, widget.Metric, filters, periodStart, periodEnd)
-		previousValue = a.querySessions(orgID, widget.Metric, filters, previousPeriodStart, previousPeriodEnd)
+	case "sessions", "flows":
+		currentValue = a.querySessions(orgID, widget.DataSource, widget.Metric, filters, periodStart, periodEnd)
+		previousValue = a.querySessions(orgID, widget.DataSource, widget.Metric, filters, previousPeriodStart, previousPeriodEnd)
 	}
 
 	response.Value = currentValue
@@ -927,14 +973,26 @@ func (a *App) queryTransfers(orgID uuid.UUID, metric, field string, filters []Fi
 	return result
 }
 
-func (a *App) querySessions(orgID uuid.UUID, _ string, filters []FilterInput, start, end time.Time) float64 {
+func (a *App) querySessions(orgID uuid.UUID, dataSource, _ string, filters []FilterInput, start, end time.Time) float64 {
+	var count int64
+
+	if dataSource == "flows" {
+		query := a.DB.Table("whatsapp_flow_submissions").Where("organization_id = ? AND created_at >= ? AND created_at <= ?", orgID, start, end)
+		query = query.Where("response_data IS NOT NULL AND response_data::text != '{}'")
+
+		for _, f := range filters {
+			query = applyFilter(dataSource, query, f)
+		}
+		query.Count(&count)
+		return float64(count)
+	}
+
 	query := a.DB.Model(&models.ChatbotSession{}).Where("organization_id = ? AND created_at >= ? AND created_at <= ?", orgID, start, end)
 
 	for _, f := range filters {
-		query = applyFilter("sessions", query, f)
+		query = applyFilter(dataSource, query, f)
 	}
 
-	var count int64
 	query.Count(&count)
 	return float64(count)
 }
@@ -953,6 +1011,12 @@ func (a *App) getChartData(orgID uuid.UUID, widget models.Widget, filters []Filt
 		FROM %s
 		WHERE organization_id = ? AND %s >= ? AND %s <= ?
 	`, dateField, tableName, dateField, dateField)
+
+	if widget.DataSource == "flows" {
+		query += " AND response_data IS NOT NULL AND response_data::text != '{}'"
+	} else if widget.DataSource == "sessions" {
+		query += " AND session_data IS NOT NULL AND session_data::text != '{}'"
+	}
 
 	args := []any{orgID, start, end}
 	query, args = appendFilterSQL(widget.DataSource, query, args, filters)
@@ -1018,7 +1082,11 @@ var allowedFilterFields = map[string]map[string]bool{
 	},
 	"sessions": {
 		"status":  true,
-		"flow_id": true,
+		"current_flow_id": true,
+	},
+	"flows": {
+		"status":  true,
+		"current_flow_id": true,
 	},
 }
 
@@ -1044,6 +1112,8 @@ func resolveDataSourceTable(dataSource string) (tableName, dateField string, ok 
 		return "agent_transfers", "transferred_at", true
 	case "sessions":
 		return "chatbot_sessions", "created_at", true
+	case "flows":
+		return "whatsapp_flow_submissions", "created_at", true
 	default:
 		return "", "", false
 	}
@@ -1085,21 +1155,46 @@ func (a *App) getGroupedData(orgID uuid.UUID, widget models.Widget, filters []Fi
 		"is_active": true, "priority": true, "category": true,
 		"type": true, "action_type": true, "provider": true,
 	}
-	if !allowedGroupByFields[widget.GroupByField] {
-		a.Log.Error("Invalid GroupByField", "field", widget.GroupByField)
-		return dataPoints
+	var dbGroupBy string
+	if (widget.DataSource == "flows" || widget.DataSource == "sessions") && !allowedGroupByFields[widget.GroupByField] {
+		if !isValidJSONFieldName(widget.GroupByField) {
+			a.Log.Error("Invalid JSON GroupByField", "field", widget.GroupByField)
+			return dataPoints
+		}
+		if widget.DataSource == "flows" {
+			dbGroupBy = fmt.Sprintf("response_data->>'%s'", widget.GroupByField)
+		} else {
+			dbGroupBy = fmt.Sprintf("session_data->>'%s'", widget.GroupByField)
+		}
+	} else {
+		if !allowedGroupByFields[widget.GroupByField] {
+			a.Log.Error("Invalid GroupByField", "field", widget.GroupByField)
+			return dataPoints
+		}
+		dbGroupBy = widget.GroupByField
 	}
 
 	query := fmt.Sprintf(`
 		SELECT %s as label, COUNT(*) as value
 		FROM %s
 		WHERE organization_id = ? AND %s >= ? AND %s <= ?
-	`, widget.GroupByField, tableName, dateField, dateField)
+	`, dbGroupBy, tableName, dateField, dateField)
+
+	if widget.DataSource == "flows" {
+		query += " AND response_data IS NOT NULL AND response_data::text != '{}'"
+	} else if widget.DataSource == "sessions" {
+		query += " AND session_data IS NOT NULL AND session_data::text != '{}'"
+	}
+
+	// Filter out null/empty values if grouping by a dynamic JSON field
+	if strings.Contains(dbGroupBy, "session_data->>") || strings.Contains(dbGroupBy, "response_data->>") {
+		query += fmt.Sprintf(" AND %s IS NOT NULL AND %s != ''", dbGroupBy, dbGroupBy)
+	}
 
 	args := []any{orgID, start, end}
 	query, args = appendFilterSQL(widget.DataSource, query, args, filters)
 
-	query += fmt.Sprintf(" GROUP BY %s ORDER BY value DESC", widget.GroupByField)
+	query += fmt.Sprintf(" GROUP BY %s ORDER BY value DESC", dbGroupBy)
 
 	type GroupedCount struct {
 		Label string
@@ -1173,16 +1268,48 @@ func (a *App) getGroupedTimeSeriesData(orgID uuid.UUID, widget models.Widget, fi
 		return result
 	}
 
+	// Resolve GroupByField to a DB expression (handles JSONB for flows/sessions)
+	allowedGroupByFields := map[string]bool{
+		"status": true, "message_status": true, "direction": true,
+		"message_type": true, "assigned_user_id": true, "channel": true,
+		"is_active": true, "priority": true, "category": true,
+		"type": true, "action_type": true, "provider": true,
+	}
+	var dbGroupBy string
+	if (widget.DataSource == "flows" || widget.DataSource == "sessions") && !allowedGroupByFields[widget.GroupByField] {
+		if !isValidJSONFieldName(widget.GroupByField) {
+			return result
+		}
+		if widget.DataSource == "flows" {
+			dbGroupBy = fmt.Sprintf("response_data->>'%s'", widget.GroupByField)
+		} else {
+			dbGroupBy = fmt.Sprintf("session_data->>'%s'", widget.GroupByField)
+		}
+	} else {
+		dbGroupBy = widget.GroupByField
+	}
+
 	query := fmt.Sprintf(`
 		SELECT DATE_TRUNC('day', %s) as date, %s as group_value, COUNT(*) as count
 		FROM %s
 		WHERE organization_id = ? AND %s >= ? AND %s <= ?
-	`, dateField, widget.GroupByField, tableName, dateField, dateField)
+	`, dateField, dbGroupBy, tableName, dateField, dateField)
+
+	if widget.DataSource == "flows" {
+		query += " AND response_data IS NOT NULL AND response_data::text != '{}'"
+	} else if widget.DataSource == "sessions" {
+		query += " AND session_data IS NOT NULL AND session_data::text != '{}'"
+	}
+
+	// Filter out null/empty grouped values for JSONB fields
+	if strings.Contains(dbGroupBy, "response_data->>") || strings.Contains(dbGroupBy, "session_data->>") {
+		query += fmt.Sprintf(" AND %s IS NOT NULL AND %s != ''", dbGroupBy, dbGroupBy)
+	}
 
 	args := []any{orgID, start, end}
 	query, args = appendFilterSQL(widget.DataSource, query, args, filters)
 
-	query += fmt.Sprintf(" GROUP BY DATE_TRUNC('day', %s), %s ORDER BY date ASC", dateField, widget.GroupByField)
+	query += fmt.Sprintf(" GROUP BY DATE_TRUNC('day', %s), %s ORDER BY date ASC", dateField, dbGroupBy)
 
 	type GroupedRow struct {
 		Date       time.Time
@@ -1320,30 +1447,56 @@ func applyFilter(dataSource string, query *gorm.DB, filter FilterInput) *gorm.DB
 // interpolated raw, which is why we whitelist the field against
 // allowedFilterFields[dataSource]. Returns ok=false (no condition, nil
 // value) for any field that isn't in the whitelist for this data source.
+var jsonFieldRegex = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
+
+func isValidJSONFieldName(field string) bool {
+	return jsonFieldRegex.MatchString(field)
+}
+
 func buildFilterSQL(dataSource string, filter FilterInput) (string, any, bool) {
-	if !allowedFilterFields[dataSource][filter.Field] {
-		return "", nil, false
-	}
 	field := filter.Field
 	value := filter.Value
 
+	var dbField string
+	if (dataSource == "flows" || dataSource == "sessions") && !allowedFilterFields[dataSource][field] {
+		if !isValidJSONFieldName(field) {
+			return "", nil, false
+		}
+		if dataSource == "flows" {
+			dbField = fmt.Sprintf("response_data->>'%s'", field)
+		} else {
+			dbField = fmt.Sprintf("session_data->>'%s'", field)
+		}
+	} else {
+		if !allowedFilterFields[dataSource][field] {
+			return "", nil, false
+		}
+		
+		dbField = field
+		
+		// Map 'current_flow_id' to 'flow_id' for whatsapp_flow_submissions
+		if dataSource == "flows" && field == "current_flow_id" {
+			dbField = "flow_id"
+		}
+	}
+
 	switch filter.Operator {
 	case "equals":
-		return fmt.Sprintf("%s = ?", field), value, true
+		return fmt.Sprintf("%s = ?", dbField), value, true
 	case "not_equals":
-		return fmt.Sprintf("%s != ?", field), value, true
+		return fmt.Sprintf("%s != ?", dbField), value, true
 	case "contains":
-		return fmt.Sprintf("%s ILIKE ?", field), "%" + value + "%", true
+		return fmt.Sprintf("%s ILIKE ?", dbField), "%" + value + "%", true
 	case "gt":
-		return fmt.Sprintf("%s > ?", field), value, true
+		return fmt.Sprintf("%s > ?", dbField), value, true
 	case "lt":
-		return fmt.Sprintf("%s < ?", field), value, true
+		return fmt.Sprintf("%s < ?", dbField), value, true
 	case "gte":
-		return fmt.Sprintf("%s >= ?", field), value, true
+		return fmt.Sprintf("%s >= ?", dbField), value, true
 	case "lte":
-		return fmt.Sprintf("%s <= ?", field), value, true
+		return fmt.Sprintf("%s <= ?", dbField), value, true
 	default:
-		return fmt.Sprintf("%s = ?", field), value, true
+		return fmt.Sprintf("%s = ?", dbField), value, true
 	}
 }
 
@@ -1383,6 +1536,13 @@ var tableQuerySQL = map[string]struct{ base, orderBy string }{
 			s.status as sub_label, s.status, '' as direction, s.created_at
 			FROM chatbot_sessions s LEFT JOIN contacts c ON c.id = s.contact_id
 			WHERE s.organization_id = ? AND s.created_at >= ? AND s.created_at <= ?`,
+		orderBy: " ORDER BY s.created_at DESC LIMIT 10",
+	},
+	"flows": {
+		base: `SELECT s.id, COALESCE(c.profile_name, c.phone_number) as label,
+			s.status as sub_label, s.status, '' as direction, s.created_at
+			FROM chatbot_sessions s LEFT JOIN contacts c ON c.id = s.contact_id
+			WHERE s.organization_id = ? AND s.created_at >= ? AND s.created_at <= ? AND s.session_data IS NOT NULL AND s.session_data::text != '{}'`,
 		orderBy: " ORDER BY s.created_at DESC LIMIT 10",
 	},
 }

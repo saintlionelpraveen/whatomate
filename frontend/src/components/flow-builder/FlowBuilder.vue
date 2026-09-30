@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
+import draggable from 'vuedraggable'
 import { Card, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -28,7 +29,8 @@ import {
   Image,
   ArrowRight,
   Settings2,
-  Layers
+  Layers,
+  GitBranch
 } from 'lucide-vue-next'
 
 // Component types available in WhatsApp Flows
@@ -44,6 +46,7 @@ const componentTypes = [
   { type: 'DatePicker', label: 'Date Picker', icon: Calendar },
   { type: 'Image', label: 'Image', icon: Image },
   { type: 'Footer', label: 'Footer Button', icon: ArrowRight },
+  { type: 'ConditionalRouter', label: 'If Condition', icon: GitBranch },
 ]
 
 interface FlowComponent {
@@ -100,6 +103,24 @@ const selectedScreen = computed(() => screens.value[selectedScreenIndex.value])
 const selectedComponent = computed(() => {
   if (selectedComponentIndex.value === null || !selectedScreen.value) return null
   return selectedScreen.value.layout.children[selectedComponentIndex.value]
+})
+
+// Available named fields on the current screen for routing
+const availableFields = computed(() => {
+  if (!selectedScreen.value) return []
+  return selectedScreen.value.layout.children
+    .filter((c: FlowComponent) => c.name && ['TextInput', 'TextArea', 'Dropdown', 'RadioButtonsGroup', 'CheckboxGroup', 'DatePicker'].includes(c.type))
+    .map((c: FlowComponent) => ({ name: c.name!, label: c.label || c.name!, type: c.type, dataSource: c['data-source'] }))
+})
+
+// Options for the selected routing field (if it has data-source like Dropdown/Radio)
+const routingFieldOptions = computed(() => {
+  if (!selectedComponent.value || selectedComponent.value.type !== 'ConditionalRouter') return []
+  const fieldName = selectedComponent.value['routing-field']
+  if (!fieldName) return []
+  const field = availableFields.value.find((f: any) => f.name === fieldName)
+  if (!field || !field.dataSource) return []
+  return field.dataSource
 })
 
 // Generate a unique ID using only alphabets and underscores (Meta requirement)
@@ -242,6 +263,13 @@ function addComponent(type: string) {
         payload: {}
       }
       break
+    case 'ConditionalRouter':
+      component['routing-field'] = ''
+      component.conditions = [
+        { value: '', target_screen: '', label: 'Condition 1' }
+      ]
+      component['else-screen'] = ''
+      break
   }
 
   selectedScreen.value.layout.children.push(component)
@@ -295,6 +323,27 @@ function updateOption(index: number, key: string, value: string) {
   selectedComponent.value['data-source'][index][key] = value
 }
 
+// --- Conditional Router helpers ---
+function addCondition() {
+  if (!selectedComponent.value || !selectedComponent.value.conditions) return
+  selectedComponent.value.conditions.push({ value: '', target_screen: '', label: `Condition ${selectedComponent.value.conditions.length + 1}` })
+}
+
+function removeCondition(index: number) {
+  if (!selectedComponent.value || !selectedComponent.value.conditions) return
+  selectedComponent.value.conditions.splice(index, 1)
+}
+
+function updateCondition(index: number, key: string, value: string) {
+  if (!selectedComponent.value || !selectedComponent.value.conditions) return
+  selectedComponent.value.conditions[index][key] = value
+}
+
+function getScreenTitle(screenId: string): string {
+  const s = screens.value.find(sc => sc.id === screenId)
+  return s?.title || screenId || 'Not set'
+}
+
 function getComponentLabel(comp: FlowComponent): string {
   const typeInfo = componentTypes.find(t => t.type === comp.type)
   return typeInfo?.label || comp.type
@@ -316,28 +365,41 @@ const componentsWithoutId = [
   'CheckboxGroup',
   'DatePicker',
   'Image',
-  'Footer'
+  'Footer',
+  'ConditionalRouter'
 ]
 
 // Sanitize flow JSON for Meta API by removing 'id' from components that don't support it
 function sanitizeFlowForMeta(flowData: { screens: FlowScreen[] }): { screens: any[] } {
   return {
-    screens: flowData.screens.map(screen => ({
-      id: screen.id,
-      title: screen.title,
-      data: screen.data,
-      layout: {
-        type: screen.layout.type,
-        children: screen.layout.children.map(comp => {
-          // Create a copy without the 'id' if component type doesn't support it
-          const { id, ...rest } = comp
-          if (componentsWithoutId.includes(comp.type)) {
-            return rest
-          }
-          return comp
-        })
+    screens: flowData.screens.map(screen => {
+      // Extract routing rules from ConditionalRouter components
+      const routerComps = screen.layout.children.filter(c => c.type === 'ConditionalRouter')
+      const routingRules = routerComps.map(rc => ({
+        field: rc['routing-field'],
+        conditions: rc.conditions || [],
+        elseScreen: rc['else-screen'] || ''
+      }))
+      const screenData = { ...screen.data }
+      if (routingRules.length > 0) {
+        screenData.__routing_rules = routingRules
       }
-    }))
+      return {
+        id: screen.id,
+        title: screen.title,
+        data: screenData,
+        layout: {
+          type: screen.layout.type,
+          children: screen.layout.children
+            .filter(comp => comp.type !== 'ConditionalRouter')
+            .map(comp => {
+              const { id, ...rest } = comp
+              if (componentsWithoutId.includes(comp.type)) { return rest }
+              return comp
+            })
+        }
+      }
+    })
   }
 }
 
@@ -365,27 +427,35 @@ defineExpose({
       <Separator />
       <ScrollArea class="flex-1">
         <div class="p-2 space-y-1">
-          <div
-            v-for="(screen, index) in screens"
-            :key="screen.id"
-            :class="[
-              'flex items-center gap-2 p-2 rounded-md cursor-pointer text-sm',
-              selectedScreenIndex === index ? 'bg-primary text-primary-foreground light:bg-primary light:text-primary-foreground' : 'hover:bg-muted'
-            ]"
-            @click="selectScreen(index)"
+          <draggable
+            v-model="screens"
+            item-key="id"
+            handle=".drag-handle"
+            ghost-class="opacity-30"
+            animation="200"
           >
-            <GripVertical class="h-4 w-4 opacity-50" />
-            <span class="flex-1 truncate">{{ screen.title }}</span>
-            <Button
-              v-if="screens.length > 1"
-              variant="ghost"
-              size="icon"
-              class="h-6 w-6 opacity-50 hover:opacity-100"
-              @click.stop="removeScreen(index)"
-            >
-              <Trash2 class="h-3 w-3" />
-            </Button>
-          </div>
+            <template #item="{ element: screen, index }">
+              <div
+                :class="[
+                  'flex items-center gap-2 p-2 rounded-md cursor-pointer text-sm',
+                  selectedScreenIndex === index ? 'bg-primary text-primary-foreground light:bg-primary light:text-primary-foreground' : 'hover:bg-muted'
+                ]"
+                @click="selectScreen(index)"
+              >
+                <GripVertical class="h-4 w-4 opacity-50 cursor-grab active:cursor-grabbing drag-handle" />
+                <span class="flex-1 truncate">{{ screen.title }}</span>
+                <Button
+                  v-if="screens.length > 1"
+                  variant="ghost"
+                  size="icon"
+                  class="h-6 w-6 opacity-50 hover:opacity-100"
+                  @click.stop="removeScreen(index)"
+                >
+                  <Trash2 class="h-3 w-3" />
+                </Button>
+              </div>
+            </template>
+          </draggable>
           <div
             v-if="screens.length === 0"
             class="p-4 text-center text-sm text-muted-foreground"
@@ -553,6 +623,31 @@ defineExpose({
                 <!-- Footer -->
                 <template v-else-if="comp.type === 'Footer'">
                   <Button class="w-full">{{ comp.label }}</Button>
+                </template>
+
+                <!-- Conditional Router -->
+                <template v-else-if="comp.type === 'ConditionalRouter'">
+                  <div class="bg-gradient-to-r from-amber-500/10 to-orange-500/10 rounded-lg p-3 border border-amber-500/30">
+                    <div class="flex items-center gap-2 mb-2">
+                      <GitBranch class="h-4 w-4 text-amber-500" />
+                      <span class="text-sm font-medium text-amber-600 dark:text-amber-400">If Condition</span>
+                    </div>
+                    <div v-if="comp['routing-field']" class="space-y-1.5">
+                      <p class="text-xs text-muted-foreground">Field: <span class="font-mono font-medium text-foreground">{{ comp['routing-field'] }}</span></p>
+                      <div v-for="(cond, ci) in comp.conditions" :key="ci" class="flex items-center gap-1.5 text-xs">
+                        <span class="text-amber-600 font-bold">→</span>
+                        <span>= "<span class="font-medium">{{ cond.value || '...' }}</span>"</span>
+                        <span class="text-muted-foreground">→</span>
+                        <Badge variant="outline" class="text-[10px] py-0">{{ getScreenTitle(cond.target_screen) }}</Badge>
+                      </div>
+                      <div v-if="comp['else-screen']" class="flex items-center gap-1.5 text-xs">
+                        <span class="text-amber-600 font-bold">→</span>
+                        <span class="text-muted-foreground">else →</span>
+                        <Badge variant="outline" class="text-[10px] py-0">{{ getScreenTitle(comp['else-screen']) }}</Badge>
+                      </div>
+                    </div>
+                    <p v-else class="text-xs text-muted-foreground italic">Click to configure conditions</p>
+                  </div>
                 </template>
 
                 <!-- Generic fallback -->
@@ -754,6 +849,99 @@ defineExpose({
                   </SelectItem>
                 </SelectContent>
               </Select>
+            </div>
+          </div>
+
+          <!-- Conditional Router specific -->
+          <div v-if="selectedComponent.type === 'ConditionalRouter'" class="space-y-4">
+            <div class="space-y-2">
+              <Label class="text-xs font-medium">Source Field</Label>
+              <Select
+                :model-value="selectedComponent['routing-field'] || ''"
+                @update:model-value="updateComponentProperty('routing-field', $event)"
+              >
+                <SelectTrigger><SelectValue placeholder="Select field to check" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="field in availableFields" :key="field.name" :value="field.name">
+                    {{ field.label }} ({{ field.name }})
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+              <p class="text-[11px] text-muted-foreground">Pick which field's value determines the next screen</p>
+            </div>
+
+            <Separator />
+
+            <div class="space-y-2">
+              <div class="flex items-center justify-between">
+                <Label class="text-xs font-medium">Routing Rules</Label>
+                <Button variant="ghost" size="sm" class="h-6 text-xs" @click="addCondition">
+                  <Plus class="h-3 w-3 mr-1" /> Add Rule
+                </Button>
+              </div>
+              <div class="space-y-3">
+                <div
+                  v-for="(cond, ci) in selectedComponent.conditions"
+                  :key="ci"
+                  class="p-3 rounded-md border bg-muted/30 space-y-2"
+                >
+                  <div class="flex items-center justify-between">
+                    <span class="text-xs font-medium text-amber-600 dark:text-amber-400">Rule {{ ci + 1 }}</span>
+                    <Button variant="ghost" size="icon" class="h-6 w-6" :disabled="selectedComponent.conditions.length <= 1" @click="removeCondition(ci)">
+                      <Trash2 class="h-3 w-3" />
+                    </Button>
+                  </div>
+                  <div class="space-y-1">
+                    <Label class="text-[11px] text-muted-foreground">If value equals</Label>
+                    <Select
+                      v-if="routingFieldOptions.length > 0"
+                      :model-value="cond.value"
+                      @update:model-value="updateCondition(ci, 'value', $event as string)"
+                    >
+                      <SelectTrigger class="h-8 text-xs"><SelectValue placeholder="Select value" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem v-for="opt in routingFieldOptions" :key="opt.id" :value="opt.id">{{ opt.title }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Input
+                      v-else
+                      :model-value="cond.value"
+                      @update:model-value="updateCondition(ci, 'value', $event as string)"
+                      class="h-8 text-xs"
+                      placeholder="Enter value to match"
+                    />
+                  </div>
+                  <div class="space-y-1">
+                    <Label class="text-[11px] text-muted-foreground">Navigate to</Label>
+                    <Select
+                      :model-value="cond.target_screen"
+                      @update:model-value="updateCondition(ci, 'target_screen', $event as string)"
+                    >
+                      <SelectTrigger class="h-8 text-xs"><SelectValue placeholder="Select screen" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem v-for="scr in screens.filter(s => s.id !== selectedScreen?.id)" :key="scr.id" :value="scr.id">{{ scr.title }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <Separator />
+
+            <div class="space-y-2">
+              <Label class="text-xs font-medium">Default (Else) Screen</Label>
+              <Select
+                :model-value="selectedComponent['else-screen'] || ''"
+                @update:model-value="updateComponentProperty('else-screen', $event)"
+              >
+                <SelectTrigger><SelectValue placeholder="Select default screen" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__complete">Complete Flow</SelectItem>
+                  <SelectItem v-for="scr in screens.filter(s => s.id !== selectedScreen?.id)" :key="scr.id" :value="scr.id">{{ scr.title }}</SelectItem>
+                </SelectContent>
+              </Select>
+              <p class="text-[11px] text-muted-foreground">Where to go if no condition matches</p>
             </div>
           </div>
         </div>
