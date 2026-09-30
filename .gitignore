@@ -10,6 +10,12 @@ bin/
 
 # Config with secrets
 config.toml
+config.local.toml
+.env
+.env.*
+*.env
+**/.env
+**/.env.*
 
 # Test binary, built with `go test -c`
 *.test
@@ -29,6 +35,10 @@ go.work
 # OS
 .DS_Store
 Thumbs.db
+
+# Dependencies
+node_modules/
+**/node_modules/
 
 # Frontend
 frontend/node_modules/
@@ -55,8 +65,18 @@ temp/
 uploads/
 audio/
 
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
 # Test results
 test-results/
 
 # Docker 
 docker/.env
+
+# Local scratch & artifacts
+scratch*
+cols.txt
+internal/handlers/tebi/
