@@ -1,0 +1,82 @@
+services:
+  # ── PostgreSQL Database ──────────────────────────────────────────
+  postgres-db:
+    image: postgres:15-alpine
+    container_name: whatomate_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: whatomate
+      POSTGRES_PASSWORD: whatomate
+      POSTGRES_DB: whatomate
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U whatomate"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Redis ────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: whatomate_redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Go CRM Dashboard (serves embedded Vue frontend + API) ──────
+  whatomate-dashboard:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: whatomate_dashboard
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+      - "10000-10100:10000-10100/udp"
+    volumes:
+      - ./docker/config.toml:/app/config.toml
+      - ./uploads:/app/uploads
+    depends_on:
+      postgres-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["server", "-config", "/app/config.toml", "-migrate"]
+
+  # ── Node.js Middleware (WhatsApp webhook + AI) ─────────────────
+  whatomate-middleware:
+    build:
+      context: ./middleware
+      dockerfile: Dockerfile.middleware
+    container_name: whatomate_middleware
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - DB_HOST=postgres-db
+      - DB_PORT=5432
+    volumes:
+      - ./uploads:/app/uploads
+      - ./crm.db:/app/crm.db
+    depends_on:
+      postgres-db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+    external: true
+    name: whatomate_postgres_data
+  redis_data:
+    external: true
+    name: whatomate_redis_data
