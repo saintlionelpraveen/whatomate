@@ -850,13 +850,14 @@ func TestMatchFlowTrigger_Match(t *testing.T) {
 // =============================================================================
 
 func TestNormalizeGeminiModel(t *testing.T) {
-	assert.Equal(t, "gemini-2.5-flash", normalizeGeminiModel(""))
-	assert.Equal(t, "gemini-2.5-flash", normalizeGeminiModel("gemini-2.0-flash"))
-	assert.Equal(t, "gemini-2.5-flash", normalizeGeminiModel("gemini-2.0-flash-lite"))
-	assert.Equal(t, "gemini-2.5-flash", normalizeGeminiModel("gemini-1.5-flash"))
-	assert.Equal(t, "gemini-2.5-flash", normalizeGeminiModel("gemini-1.5-pro"))
-	assert.Equal(t, "gemini-2.5-flash", normalizeGeminiModel("models/gemini-2.0-flash"))
-	assert.Equal(t, "gemini-2.5-flash", normalizeGeminiModel("gemini-2.5-flash"))
+	assert.Equal(t, "gemini-3.5-flash", normalizeGeminiModel(""))
+	assert.Equal(t, "gemini-3.5-flash", normalizeGeminiModel("gemini-2.0-flash"))
+	assert.Equal(t, "gemini-3.5-flash", normalizeGeminiModel("gemini-2.0-flash-lite"))
+	assert.Equal(t, "gemini-3.5-flash", normalizeGeminiModel("gemini-1.5-flash"))
+	assert.Equal(t, "gemini-3.5-flash", normalizeGeminiModel("gemini-1.5-pro"))
+	assert.Equal(t, "gemini-3.5-flash", normalizeGeminiModel("models/gemini-2.0-flash"))
+	assert.Equal(t, "gemini-3.5-flash", normalizeGeminiModel("gemini-2.5-flash"))
+	assert.Equal(t, "gemini-3.5-flash-lite", normalizeGeminiModel("gemini-2.5-flash-lite"))
 	assert.Equal(t, "gemini-3.8-flash", normalizeGeminiModel("gemini-3.8-flash"))
 }
 
