@@ -64,6 +64,7 @@ import {
   MoreVertical,
   Phone,
   PhoneCall,
+  PhoneMissed,
   Check,
   CheckCheck,
   Clock,
@@ -487,7 +488,9 @@ function onUserActive() {
   if (document.visibilityState !== 'visible' || !document.hasFocus()) return
   if (!firstUnreadId.value) return
   if (contactsStore.currentContact) {
-    contactsService.markRead(contactsStore.currentContact.id)
+    const contactId = contactsStore.currentContact.id
+    contactsService.markRead(contactId)
+      .then(() => contactsStore.markContactRead(contactId))
       .catch(() => { /* non-critical */ })
   }
   nextTick(() => {
@@ -800,6 +803,7 @@ function getReplyPreviewContent(message: Message): string {
   if (reply.message_type === 'document') return '[Document]'
   if (reply.message_type === 'location') return '[Location]'
   if (reply.message_type === 'contacts') return '[Contact]'
+  if (reply.message_type === 'call') return '[Missed call]'
   if (reply.message_type === 'sticker') return '[Sticker]'
   return '[Message]'
 }
@@ -1405,6 +1409,9 @@ function getMessageContent(message: Message): string {
   }
   if (message.message_type === 'unsupported') {
     return '' // Displayed as a visual card, not text
+  }
+  if (message.message_type === 'call') {
+    return '' // Missed calls render as their own card
   }
   return '[Message]'
 }
@@ -2238,6 +2245,13 @@ async function sendMediaMessage() {
                         <span class="truncate">{{ contact.phones.join(', ') }}</span>
                       </div>
                     </div>
+                  </div>
+                </div>
+                <!-- Missed call (click-to-call the originating agent never picked up) -->
+                <div v-else-if="message.message_type === 'call'" class="mb-2">
+                  <div class="flex items-center gap-2 px-3 py-2 bg-background/50 rounded-lg">
+                    <PhoneMissed class="h-4 w-4 text-red-500 shrink-0" />
+                    <span class="text-sm">{{ $t('chat.missedCall', 'Missed call') }}</span>
                   </div>
                 </div>
                 <!-- Unsupported message -->
